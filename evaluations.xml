@@ -1,0 +1,89 @@
+<evaluation>
+  <!--
+    Evaluation questions for apple-mcp-server.
+
+    All questions are read-only against the host machine. They assume a
+    "typical" personal macOS setup (an Inbox in Mail, at least one Calendar,
+    at least one Reminders list, at least one Contact). To make answers
+    deterministic on an arbitrary developer's machine, each question is
+    structured so the answer is either:
+      (a) a small integer (count / index), or
+      (b) the literal name / id of an entity that the agent must discover
+          via multiple tool calls.
+    A test harness should populate the user's machine with the fixture data
+    referenced below before running the evals.
+
+    Fixture setup the evals assume (loaded by `scripts/load-fixtures.osascript`):
+      Calendar:
+        - A calendar named "MCP-Eval" containing exactly 3 events:
+          * "Project kickoff",  2026-06-01 09:00–10:00, location "HQ"
+          * "Design review",    2026-06-02 14:00–15:00
+          * "Retro",            2026-06-05 16:00–16:30, location "Zoom"
+      Reminders:
+        - A list named "MCP-Eval" containing exactly 4 reminders:
+          * "Renew passport" (flagged, due 2026-06-10)
+          * "Send tax docs"  (priority 1, due 2026-06-15)
+          * "Buy milk"
+          * "Read MCP spec"  (completed)
+      Contacts:
+        - A contact "MCP Eval Tester" with org "Apple MCP Eval Co",
+          email work=eval-tester@example.com, phone mobile=+15551234567
+        - A second contact with the same org but a different name
+          "MCP Eval Sidekick"
+      Mail:
+        - Inbox seeded with exactly 5 emails from
+          "evalbot@example.com" whose subjects begin with "[MCP-EVAL]";
+          2 of them are unread.
+  -->
+
+  <qa_pair>
+    <question>Use the Apple MCP tools to find the calendar named "MCP-Eval". How many events are stored in it? Answer with a single integer.</question>
+    <answer>3</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>In the calendar "MCP-Eval", what is the location field of the event whose summary is "Project kickoff"? Answer with the literal location string.</question>
+    <answer>HQ</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Across all calendars, list events whose summary contains the substring "Retro" using apple_search_events. What is the location of the matching event? Answer with the literal location string.</question>
+    <answer>Zoom</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Use apple_list_reminder_lists then apple_list_reminders to count how many *incomplete* reminders live in the list named "MCP-Eval". Answer with a single integer.</question>
+    <answer>3</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>In the reminders list "MCP-Eval", which reminder has its `flagged` property set to true? Answer with the exact reminder name.</question>
+    <answer>Renew passport</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>In the reminders list "MCP-Eval", which reminder has priority equal to 1 (i.e. high priority)? Answer with the exact reminder name.</question>
+    <answer>Send tax docs</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Use apple_search_contacts to find people whose organization or name matches "Apple MCP Eval Co". How many distinct contacts share this organization? Answer with a single integer.</question>
+    <answer>2</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Find the contact named "MCP Eval Tester" and return the value of their work email address. Answer with just the email address.</question>
+    <answer>eval-tester@example.com</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Use apple_search_messages to find messages in the Inbox whose subject contains "[MCP-EVAL]". How many such messages are there? Answer with a single integer.</question>
+    <answer>5</answer>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Among the messages whose subject contains "[MCP-EVAL]" in the Inbox, how many are currently unread (readStatus = false)? Answer with a single integer.</question>
+    <answer>2</answer>
+  </qa_pair>
+
+</evaluation>
