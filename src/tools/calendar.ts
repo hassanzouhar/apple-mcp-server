@@ -578,6 +578,11 @@ async function updateEvent(params: z.infer<typeof UpdateEventInput>) {
 const DeleteEventInput = z
   .object({
     event_id: z.string().min(1),
+    confirm: z
+      .literal(true)
+      .describe(
+        "Required acknowledgement that the deletion is permanent. Must be true.",
+      ),
     response_format: responseFormatField,
   })
   .strict();
@@ -723,7 +728,7 @@ export function registerCalendarTools(server: McpServer) {
     {
       title: "Delete Calendar Event",
       description:
-        "Permanently delete an event. This cannot be undone. Pass the event's UID.",
+        "Permanently delete an event. This cannot be undone. Pass the event's UID. You MUST pass confirm=true to acknowledge.",
       inputSchema: DeleteEventInput.shape,
       annotations: {
         readOnlyHint: false,

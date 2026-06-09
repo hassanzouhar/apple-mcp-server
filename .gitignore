@@ -14,6 +14,8 @@ venv.bak/
 # Production builds
 build/
 dist/
+server/
+*.mcpb
 *.egg-info/
 .eggs/
 

@@ -420,6 +420,11 @@ async function updateContact(params: z.infer<typeof UpdateContactInput>) {
 const DeleteContactInput = z
   .object({
     contact_id: z.string().min(1),
+    confirm: z
+      .literal(true)
+      .describe(
+        "Required acknowledgement that the deletion is permanent. Must be true.",
+      ),
     response_format: responseFormatField,
   })
   .strict();
@@ -524,7 +529,8 @@ export function registerContactTools(server: McpServer) {
     "apple_delete_contact",
     {
       title: "Delete Contact",
-      description: "Permanently delete a contact. This cannot be undone.",
+      description:
+        "Permanently delete a contact. This cannot be undone. You MUST pass confirm=true to acknowledge.",
       inputSchema: DeleteContactInput.shape,
       annotations: {
         readOnlyHint: false,

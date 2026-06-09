@@ -1,0 +1,19 @@
+# The bundle ships only manifest.json + the self-contained server/index.js
+# (esbuild output). Exclude all dev/build inputs and tooling.
+node_modules/
+src/
+dist/
+*.map
+*.tsbuildinfo
+package.json
+package-lock.json
+tsconfig.json
+evaluations.xml
+CLAUDE.md
+.gitignore
+.claude/
+.git/
+.DS_Store
+**/.DS_Store
+.mcpbignore
+*.mcpb

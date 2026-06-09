@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "apple-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for Apple Calendar, Reminders, Contacts, and Mail via AppleScript/JXA.",
+  "author": { "name": "haz", "email": "hassan.zouhar@icloud.com" },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin"],
+    "runtimes": { "node": ">=18" }
+  }
+}

@@ -471,6 +471,11 @@ async function completeReminder(params: z.infer<typeof CompleteReminderInput>) {
 const DeleteReminderInput = z
   .object({
     reminder_id: z.string().min(1),
+    confirm: z
+      .literal(true)
+      .describe(
+        "Required acknowledgement that the deletion is permanent. Must be true.",
+      ),
     response_format: responseFormatField,
   })
   .strict();
@@ -646,7 +651,7 @@ export function registerReminderTools(server: McpServer) {
     {
       title: "Delete Reminder",
       description:
-        "Permanently delete a reminder. This cannot be undone. Pass the reminder's id.",
+        "Permanently delete a reminder. This cannot be undone. Pass the reminder's id. You MUST pass confirm=true to acknowledge.",
       inputSchema: DeleteReminderInput.shape,
       annotations: {
         readOnlyHint: false,
