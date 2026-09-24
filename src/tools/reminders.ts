@@ -1,31 +1,26 @@
 /**
- * Reminders.app tools.
+ * Reminders.app tools — backed by EventKit (see services/eventkit.ts).
  *
- * All ops go through JXA (Application('Reminders')). Reminders has the cleanest
- * AppleScript dictionary of the four apps we cover: lists contain reminders;
- * reminders have name, body, completed, completion date, due date, remind-me
- * date, priority, and flagged.
+ * Reads and writes both go through EventKit so identifiers are consistent and
+ * list/search queries are fast. NOTE: EventKit does not expose the "flagged"
+ * attribute, so `flagged` reads back as false and cannot be set through these
+ * tools (the field is accepted but ignored on create/update).
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import {
-  isoDateField,
   limitField,
   optionalIsoDateField,
   responseFormatField,
 } from "../schemas/common.js";
-import {
-  ResponseFormat,
-  buildResult,
-  errorResult,
-  humanDate,
-} from "../services/format.js";
-import { runJxa } from "../services/osascript.js";
+import { buildResult, errorResult, humanDate } from "../services/format.js";
+import { runHelper } from "../services/eventkit.js";
+import { consolidatedShape, parseAction } from "./dispatch.js";
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* Types returned from JXA scripts                                          */
+/* Types returned from the EventKit helper                                   */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 interface RawReminderList {
@@ -47,7 +42,7 @@ interface RawReminder {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_list_reminder_lists                                                */
+/* list_reminder_lists                                                */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const ListListsInput = z
@@ -58,12 +53,7 @@ const ListListsInput = z
 
 async function listLists(params: z.infer<typeof ListListsInput>) {
   try {
-    const lists = await runJxa<RawReminderList[]>({
-      script: `
-        const Reminders = Application('Reminders');
-        return Reminders.lists().map(l => ({ id: l.id(), name: l.name() }));
-      `,
-    });
+    const lists = await runHelper<RawReminderList[]>("list-reminder-lists");
     const md = [
       `# Reminder Lists (${lists.length})`,
       "",
@@ -79,7 +69,7 @@ async function listLists(params: z.infer<typeof ListListsInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_list_reminders                                                     */
+/* list_reminders                                                     */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const ListRemindersInput = z
@@ -89,7 +79,7 @@ const ListRemindersInput = z
       .min(1)
       .optional()
       .describe(
-        "Optional. Limit to one list. Use apple_list_reminder_lists to discover names.",
+        "Optional. Limit to one list. Use action 'list_lists' to discover names.",
       ),
     include_completed: z
       .boolean()
@@ -108,80 +98,41 @@ const ListRemindersInput = z
   })
   .strict();
 
+function renderReminders(title: string, reminders: RawReminder[]): string {
+  return [
+    title,
+    "",
+    reminders.length === 0
+      ? "_No reminders match._"
+      : reminders
+          .map(
+            (r) =>
+              `- ${r.completed ? "✅" : "⬜"} **${r.name}** ` +
+              (r.dueDate ? `_(due ${humanDate(r.dueDate)})_ ` : "") +
+              `_(${r.listName})_ — id: \`${r.id}\``,
+          )
+          .join("\n"),
+  ].join("\n");
+}
+
 async function listReminders(params: z.infer<typeof ListRemindersInput>) {
   try {
-    const reminders = await runJxa<RawReminder[]>({
-      args: {
-        listName: params.list_name ?? null,
-        includeCompleted: params.include_completed,
-        dueBefore: params.due_before ?? null,
-        dueAfter: params.due_after ?? null,
-        limit: params.limit,
-      },
-      script: `
-        const Reminders = Application('Reminders');
-        const lists = INPUT.listName
-          ? Reminders.lists.whose({ name: INPUT.listName })()
-          : Reminders.lists();
-        if (INPUT.listName && lists.length === 0) {
-          throw new Error("Reminder list not found: " + INPUT.listName);
-        }
-        const dueBefore = INPUT.dueBefore ? new Date(INPUT.dueBefore) : null;
-        const dueAfter  = INPUT.dueAfter  ? new Date(INPUT.dueAfter)  : null;
-
-        const out = [];
-        for (let i = 0; i < lists.length && out.length < INPUT.limit; i++) {
-          const list = lists[i];
-          const rems = list.reminders();
-          for (let j = 0; j < rems.length && out.length < INPUT.limit; j++) {
-            const r = rems[j];
-            const completed = !!r.completed();
-            if (completed && !INPUT.includeCompleted) continue;
-            let due = null;
-            try { due = r.dueDate(); } catch (_) {}
-            if (dueBefore && (!due || due >= dueBefore)) continue;
-            if (dueAfter && (!due || due < dueAfter)) continue;
-            let rmd = null, comp = null;
-            try { rmd = r.remindMeDate(); } catch (_) {}
-            try { comp = r.completionDate(); } catch (_) {}
-            out.push({
-              id: r.id(),
-              name: r.name() || "",
-              body: r.body() || null,
-              completed,
-              completionDate: comp ? comp.toISOString() : null,
-              dueDate: due ? due.toISOString() : null,
-              remindMeDate: rmd ? rmd.toISOString() : null,
-              priority: r.priority() || 0,
-              flagged: !!r.flagged(),
-              listName: list.name(),
-            });
-          }
-        }
-        return out;
-      `,
+    const reminders = await runHelper<RawReminder[]>("list-reminders", {
+      listName: params.list_name ?? null,
+      includeCompleted: params.include_completed,
+      dueBeforeIso: params.due_before ?? null,
+      dueAfterIso: params.due_after ?? null,
+      limit: params.limit,
     });
-
     const structured = {
       count: reminders.length,
       list_name: params.list_name ?? null,
       reminders,
     };
-    const md = [
+    const md = renderReminders(
       `# Reminders${params.list_name ? ` in \`${params.list_name}\`` : ""} (${reminders.length})`,
-      "",
-      reminders.length === 0
-        ? "_No reminders match._"
-        : reminders
-            .map(
-              (r) =>
-                `- ${r.completed ? "✅" : "⬜"} **${r.name}** ` +
-                (r.dueDate ? `_(due ${humanDate(r.dueDate)})_ ` : "") +
-                (r.flagged ? "🚩 " : "") +
-                `_(${r.listName})_ — id: \`${r.id}\``,
-            )
-            .join("\n"),
-    ].join("\n");
+      reminders,
+    );
     return buildResult(params.response_format, md, structured);
   } catch (e) {
     return errorResult(e);
@@ -189,7 +140,7 @@ async function listReminders(params: z.infer<typeof ListRemindersInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_search_reminders                                                   */
+/* search_reminders                                                   */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const SearchRemindersInput = z
@@ -208,51 +159,12 @@ const SearchRemindersInput = z
 
 async function searchReminders(params: z.infer<typeof SearchRemindersInput>) {
   try {
-    const reminders = await runJxa<RawReminder[]>({
-      args: {
-        query: params.query.toLowerCase(),
-        includeCompleted: params.include_completed,
-        listName: params.list_name ?? null,
-        limit: params.limit,
-      },
-      script: `
-        const Reminders = Application('Reminders');
-        const lists = INPUT.listName
-          ? Reminders.lists.whose({ name: INPUT.listName })()
-          : Reminders.lists();
-        const out = [];
-        for (let i = 0; i < lists.length && out.length < INPUT.limit; i++) {
-          const list = lists[i];
-          const rems = list.reminders();
-          for (let j = 0; j < rems.length && out.length < INPUT.limit; j++) {
-            const r = rems[j];
-            const completed = !!r.completed();
-            if (completed && !INPUT.includeCompleted) continue;
-            const name = (r.name() || "").toLowerCase();
-            const body = (r.body() || "").toLowerCase();
-            if (!name.includes(INPUT.query) && !body.includes(INPUT.query)) continue;
-            let due = null, rmd = null, comp = null;
-            try { due = r.dueDate(); } catch (_) {}
-            try { rmd = r.remindMeDate(); } catch (_) {}
-            try { comp = r.completionDate(); } catch (_) {}
-            out.push({
-              id: r.id(),
-              name: r.name() || "",
-              body: r.body() || null,
-              completed,
-              completionDate: comp ? comp.toISOString() : null,
-              dueDate: due ? due.toISOString() : null,
-              remindMeDate: rmd ? rmd.toISOString() : null,
-              priority: r.priority() || 0,
-              flagged: !!r.flagged(),
-              listName: list.name(),
-            });
-          }
-        }
-        return out;
-      `,
+    const reminders = await runHelper<RawReminder[]>("list-reminders", {
+      query: params.query,
+      includeCompleted: params.include_completed,
+      listName: params.list_name ?? null,
+      limit: params.limit,
     });
-
     const md = [
       `# Reminder search: \`${params.query}\` (${reminders.length})`,
       "",
@@ -272,7 +184,7 @@ async function searchReminders(params: z.infer<typeof SearchRemindersInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_create_reminder                                                    */
+/* create_reminder                                                    */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const CreateReminderInput = z
@@ -280,7 +192,7 @@ const CreateReminderInput = z
     list_name: z
       .string()
       .min(1)
-      .describe("Target list. Use apple_list_reminder_lists to discover names."),
+      .describe("Target list. Use action 'list_lists' to discover names."),
     name: z.string().min(1).max(500).describe("The reminder's title."),
     body: z.string().max(5000).optional().describe("Notes / details."),
     due_date: optionalIsoDateField.describe(
@@ -295,47 +207,21 @@ const CreateReminderInput = z
       .min(0)
       .max(9)
       .optional()
-      .describe(
-        "0 = none, 1 = high, 5 = medium, 9 = low (Apple's numbering).",
-      ),
-    flagged: z.boolean().optional(),
+      .describe("0 = none, 1 = high, 5 = medium, 9 = low (Apple's numbering)."),
     response_format: responseFormatField,
   })
   .strict();
 
 async function createReminder(params: z.infer<typeof CreateReminderInput>) {
   try {
-    const result = await runJxa<{ id: string }>({
-      args: {
-        listName: params.list_name,
-        name: params.name,
-        body: params.body ?? null,
-        dueIso: params.due_date ?? null,
-        remindIso: params.remind_me_date ?? null,
-        priority: params.priority ?? null,
-        flagged: params.flagged ?? null,
-      },
-      script: `
-        const Reminders = Application('Reminders');
-        const lists = Reminders.lists.whose({ name: INPUT.listName })();
-        if (lists.length === 0) {
-          throw new Error("Reminder list not found: " + INPUT.listName);
-        }
-        const list = lists[0];
-
-        const props = { name: INPUT.name };
-        if (INPUT.body) props.body = INPUT.body;
-        if (INPUT.dueIso) props.dueDate = new Date(INPUT.dueIso);
-        if (INPUT.remindIso) props.remindMeDate = new Date(INPUT.remindIso);
-        if (INPUT.priority !== null) props.priority = INPUT.priority;
-        if (INPUT.flagged !== null) props.flagged = INPUT.flagged;
-
-        const r = Reminders.Reminder(props);
-        list.reminders.push(r);
-        return { id: r.id() };
-      `,
+    const result = await runHelper<{ id: string }>("create-reminder", {
+      listName: params.list_name,
+      name: params.name,
+      body: params.body ?? null,
+      dueIso: params.due_date ?? null,
+      remindIso: params.remind_me_date ?? null,
+      priority: params.priority ?? null,
     });
-
     return buildResult(
       params.response_format,
       `Created reminder **${params.name}** in **${params.list_name}** — id: \`${result.id}\``,
@@ -347,7 +233,7 @@ async function createReminder(params: z.infer<typeof CreateReminderInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_update_reminder                                                    */
+/* update_reminder                                                    */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const UpdateReminderInput = z
@@ -358,7 +244,6 @@ const UpdateReminderInput = z
     due_date: optionalIsoDateField,
     remind_me_date: optionalIsoDateField,
     priority: z.number().int().min(0).max(9).optional(),
-    flagged: z.boolean().optional(),
     response_format: responseFormatField,
   })
   .strict();
@@ -370,7 +255,6 @@ async function updateReminder(params: z.infer<typeof UpdateReminderInput>) {
     params.due_date,
     params.remind_me_date,
     params.priority,
-    params.flagged,
   ].some((x) => x !== undefined);
   if (!hasUpdate) {
     return errorResult(
@@ -378,34 +262,13 @@ async function updateReminder(params: z.infer<typeof UpdateReminderInput>) {
     );
   }
   try {
-    const ok = await runJxa<{ updated: boolean }>({
-      args: {
-        reminderId: params.reminder_id,
-        name: params.name ?? null,
-        body: params.body ?? null,
-        dueIso: params.due_date ?? null,
-        remindIso: params.remind_me_date ?? null,
-        priority: params.priority ?? null,
-        flagged: params.flagged ?? null,
-      },
-      script: `
-        const Reminders = Application('Reminders');
-        const lists = Reminders.lists();
-        for (let i = 0; i < lists.length; i++) {
-          const rems = lists[i].reminders.whose({ id: INPUT.reminderId })();
-          if (rems.length > 0) {
-            const r = rems[0];
-            if (INPUT.name !== null) r.name = INPUT.name;
-            if (INPUT.body !== null) r.body = INPUT.body;
-            if (INPUT.dueIso !== null) r.dueDate = new Date(INPUT.dueIso);
-            if (INPUT.remindIso !== null) r.remindMeDate = new Date(INPUT.remindIso);
-            if (INPUT.priority !== null) r.priority = INPUT.priority;
-            if (INPUT.flagged !== null) r.flagged = INPUT.flagged;
-            return { updated: true };
-          }
-        }
-        throw new Error("Reminder not found: " + INPUT.reminderId);
-      `,
+    const ok = await runHelper<{ updated: boolean }>("update-reminder", {
+      id: params.reminder_id,
+      name: params.name ?? null,
+      body: params.body ?? null,
+      dueIso: params.due_date ?? null,
+      remindIso: params.remind_me_date ?? null,
+      priority: params.priority ?? null,
     });
     return buildResult(
       params.response_format,
@@ -418,7 +281,7 @@ async function updateReminder(params: z.infer<typeof UpdateReminderInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_complete_reminder                                                  */
+/* complete_reminder                                                  */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const CompleteReminderInput = z
@@ -436,23 +299,9 @@ const CompleteReminderInput = z
 
 async function completeReminder(params: z.infer<typeof CompleteReminderInput>) {
   try {
-    const ok = await runJxa<{ completed: boolean }>({
-      args: {
-        reminderId: params.reminder_id,
-        completed: params.completed,
-      },
-      script: `
-        const Reminders = Application('Reminders');
-        const lists = Reminders.lists();
-        for (let i = 0; i < lists.length; i++) {
-          const rems = lists[i].reminders.whose({ id: INPUT.reminderId })();
-          if (rems.length > 0) {
-            rems[0].completed = INPUT.completed;
-            return { completed: INPUT.completed };
-          }
-        }
-        throw new Error("Reminder not found: " + INPUT.reminderId);
-      `,
+    const ok = await runHelper<{ completed: boolean }>("complete-reminder", {
+      id: params.reminder_id,
+      completed: params.completed,
     });
     return buildResult(
       params.response_format,
@@ -465,7 +314,7 @@ async function completeReminder(params: z.infer<typeof CompleteReminderInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_delete_reminder                                                    */
+/* delete_reminder                                                    */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const DeleteReminderInput = z
@@ -482,20 +331,8 @@ const DeleteReminderInput = z
 
 async function deleteReminder(params: z.infer<typeof DeleteReminderInput>) {
   try {
-    const ok = await runJxa<{ deleted: boolean }>({
-      args: { reminderId: params.reminder_id },
-      script: `
-        const Reminders = Application('Reminders');
-        const lists = Reminders.lists();
-        for (let i = 0; i < lists.length; i++) {
-          const rems = lists[i].reminders.whose({ id: INPUT.reminderId })();
-          if (rems.length > 0) {
-            Reminders.delete(rems[0]);
-            return { deleted: true };
-          }
-        }
-        throw new Error("Reminder not found: " + INPUT.reminderId);
-      `,
+    const ok = await runHelper<{ deleted: boolean }>("delete-reminder", {
+      id: params.reminder_id,
     });
     return buildResult(
       params.response_format,
@@ -508,7 +345,7 @@ async function deleteReminder(params: z.infer<typeof DeleteReminderInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_create_reminder_list                                               */
+/* create_reminder_list                                               */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const CreateListInput = z
@@ -520,14 +357,8 @@ const CreateListInput = z
 
 async function createList(params: z.infer<typeof CreateListInput>) {
   try {
-    const result = await runJxa<{ id: string }>({
-      args: { name: params.name },
-      script: `
-        const Reminders = Application('Reminders');
-        const list = Reminders.List({ name: INPUT.name });
-        Reminders.lists.push(list);
-        return { id: list.id() };
-      `,
+    const result = await runHelper<{ id: string }>("create-reminder-list", {
+      name: params.name,
     });
     return buildResult(
       params.response_format,
@@ -543,116 +374,84 @@ async function createList(params: z.infer<typeof CreateListInput>) {
 /* Registration                                                             */
 /* ──────────────────────────────────────────────────────────────────────── */
 
+const reminderAction = z
+  .enum([
+    "list_lists",
+    "list",
+    "search",
+    "create",
+    "update",
+    "complete",
+    "delete",
+    "create_list",
+  ])
+  .describe(
+    [
+      "Which Reminders operation to perform. Required fields per action:",
+      "• list_lists — (no other fields)",
+      "• list — optional list_name, include_completed, due_before, due_after, limit",
+      "• search — query; optional list_name, include_completed, limit",
+      "• create — list_name, name; optional body, due_date, remind_me_date, priority",
+      "• update — reminder_id + at least one of name/body/due_date/remind_me_date/priority",
+      "• complete — reminder_id; optional completed (default true)",
+      "• delete — reminder_id, confirm=true",
+      "• create_list — name",
+    ].join("\n"),
+  );
+
+const ReminderToolInput = z.object(
+  consolidatedShape(reminderAction, [
+    ListListsInput,
+    ListRemindersInput,
+    SearchRemindersInput,
+    CreateReminderInput,
+    UpdateReminderInput,
+    CompleteReminderInput,
+    DeleteReminderInput,
+    CreateListInput,
+  ]),
+);
+
+async function dispatchReminders(raw: z.infer<typeof ReminderToolInput>) {
+  try {
+    switch (raw.action) {
+      case "list_lists":
+        return await listLists(parseAction(ListListsInput, raw));
+      case "list":
+        return await listReminders(parseAction(ListRemindersInput, raw));
+      case "search":
+        return await searchReminders(parseAction(SearchRemindersInput, raw));
+      case "create":
+        return await createReminder(parseAction(CreateReminderInput, raw));
+      case "update":
+        return await updateReminder(parseAction(UpdateReminderInput, raw));
+      case "complete":
+        return await completeReminder(parseAction(CompleteReminderInput, raw));
+      case "delete":
+        return await deleteReminder(parseAction(DeleteReminderInput, raw));
+      case "create_list":
+        return await createList(parseAction(CreateListInput, raw));
+      default:
+        return errorResult(
+          new Error(`Unknown reminders action: ${String(raw.action)}`),
+        );
+    }
+  } catch (e) {
+    return errorResult(e);
+  }
+}
+
 export function registerReminderTools(server: McpServer) {
   server.registerTool(
-    "apple_list_reminder_lists",
+    "reminders",
     {
-      title: "List Reminder Lists",
+      title: "Reminders",
       description:
-        "List every reminder list in Reminders.app (across all configured accounts: local, iCloud, Exchange). Returns each list's id and name. Use this first to discover the `list_name` values that other Reminders tools accept.",
-      inputSchema: ListListsInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    listLists,
-  );
-
-  server.registerTool(
-    "apple_list_reminders",
-    {
-      title: "List Reminders",
-      description:
-        "List reminders, optionally filtered to one list, by completion state, and by due-date range. Returns id, name, body, completed flag, completion/due/remind-me dates, priority (0-9), flagged flag, and list name. Set include_completed=true to also return completed items.",
-      inputSchema: ListRemindersInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    listReminders,
-  );
-
-  server.registerTool(
-    "apple_search_reminders",
-    {
-      title: "Search Reminders",
-      description:
-        "Case-insensitive substring search against reminder name and body. Optionally narrow by list or include completed items.",
-      inputSchema: SearchRemindersInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    searchReminders,
-  );
-
-  server.registerTool(
-    "apple_create_reminder",
-    {
-      title: "Create Reminder",
-      description:
-        "Create a new reminder in the named list. Required: list_name, name. Optionally set body, due_date, remind_me_date, priority (0/1/5/9), or flagged. Returns the new reminder's id.",
-      inputSchema: CreateReminderInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    createReminder,
-  );
-
-  server.registerTool(
-    "apple_update_reminder",
-    {
-      title: "Update Reminder",
-      description:
-        "Update one or more fields of an existing reminder. Only fields you supply are changed.",
-      inputSchema: UpdateReminderInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    updateReminder,
-  );
-
-  server.registerTool(
-    "apple_complete_reminder",
-    {
-      title: "Complete/Re-open Reminder",
-      description:
-        "Toggle a reminder's completed state. Pass completed=false to re-open a completed reminder.",
-      inputSchema: CompleteReminderInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    completeReminder,
-  );
-
-  server.registerTool(
-    "apple_delete_reminder",
-    {
-      title: "Delete Reminder",
-      description:
-        "Permanently delete a reminder. This cannot be undone. Pass the reminder's id. You MUST pass confirm=true to acknowledge.",
-      inputSchema: DeleteReminderInput.shape,
+        "Read and manage Reminders.app. Pick an operation with `action`: " +
+        "list_lists, list, search, create, update, complete, delete, create_list. " +
+        "See the `action` field for the parameters each operation needs. " +
+        "Destructive actions (delete) require confirm=true.",
+      inputSchema: ReminderToolInput.shape,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -660,23 +459,6 @@ export function registerReminderTools(server: McpServer) {
         openWorldHint: true,
       },
     },
-    deleteReminder,
-  );
-
-  server.registerTool(
-    "apple_create_reminder_list",
-    {
-      title: "Create Reminder List",
-      description:
-        "Create a new reminder list. The list is created in the default account.",
-      inputSchema: CreateListInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    createList,
+    dispatchReminders,
   );
 }

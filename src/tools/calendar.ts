@@ -1,9 +1,9 @@
 /**
- * Calendar.app tools.
+ * Calendar.app tools — backed by EventKit (see services/eventkit.ts).
  *
- * All operations go through JXA (Application('Calendar')). We try to keep each
- * JXA script as small and side-effect-aware as possible, and we always return
- * structured data that we can re-shape into Markdown server-side.
+ * Reads and writes both go through the native EventKit framework so that the
+ * event identifiers we return are the same ids the update/delete commands
+ * accept, and so date-range queries are fast instead of timing out.
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -15,17 +15,12 @@ import {
   optionalIsoDateField,
   responseFormatField,
 } from "../schemas/common.js";
-import {
-  ResponseFormat,
-  buildResult,
-  clip,
-  errorResult,
-  humanDate,
-} from "../services/format.js";
-import { runJxa } from "../services/osascript.js";
+import { buildResult, clip, errorResult, humanDate } from "../services/format.js";
+import { runHelper, isoDaysFromNow } from "../services/eventkit.js";
+import { consolidatedShape, parseAction } from "./dispatch.js";
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* Types returned from JXA scripts                                          */
+/* Types returned from the EventKit helper                                  */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 interface RawCalendar {
@@ -49,7 +44,7 @@ interface RawEvent {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_list_calendars                                                     */
+/* list_calendars                                                     */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const ListCalendarsInput = z
@@ -60,31 +55,7 @@ const ListCalendarsInput = z
 
 async function listCalendars(params: z.infer<typeof ListCalendarsInput>) {
   try {
-    const cals = await runJxa<RawCalendar[]>({
-      script: `
-        const Calendar = Application('Calendar');
-        const out = [];
-        const all = Calendar.calendars();
-        for (let i = 0; i < all.length; i++) {
-          const c = all[i];
-          let color = null;
-          try { color = c.color(); } catch (_) {}
-          let description = null;
-          try { description = c.description(); } catch (_) {}
-          let writable = true;
-          try { writable = c.writable(); } catch (_) {}
-          out.push({
-            id: c.uid(),
-            name: c.name(),
-            description: description || null,
-            writable: !!writable,
-            color: color || null,
-          });
-        }
-        return out;
-      `,
-    });
-
+    const cals = await runHelper<RawCalendar[]>("list-calendars");
     const structured = { count: cals.length, calendars: cals };
     const md = [
       `# Calendars (${cals.length})`,
@@ -94,7 +65,6 @@ async function listCalendars(params: z.infer<typeof ListCalendarsInput>) {
           `- **${c.name}**${c.writable ? "" : " _(read-only)_"} — id: \`${c.id}\``,
       ),
     ].join("\n");
-
     return buildResult(params.response_format, md, structured);
   } catch (e) {
     return errorResult(e);
@@ -102,7 +72,7 @@ async function listCalendars(params: z.infer<typeof ListCalendarsInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_list_events                                                        */
+/* list_events                                                        */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const ListEventsInput = z
@@ -118,7 +88,7 @@ const ListEventsInput = z
       .min(1)
       .optional()
       .describe(
-        "Optional. Limit results to one calendar. Use apple_list_calendars to find names.",
+        "Optional. Limit results to one calendar. Use action 'list_calendars' to find names.",
       ),
     limit: limitField,
     response_format: responseFormatField,
@@ -127,75 +97,11 @@ const ListEventsInput = z
 
 async function listEvents(params: z.infer<typeof ListEventsInput>) {
   try {
-    const events = await runJxa<RawEvent[]>({
-      args: {
-        startIso: params.start_date,
-        endIso: params.end_date,
-        calendarName: params.calendar_name ?? null,
-        limit: params.limit,
-      },
-      // Calendar's whose() over events is unreliable across versions, so we
-      // iterate calendars and filter by start date in JS. We bail out as soon
-      // as we hit the limit. We DO use whose() to narrow per-calendar to a
-      // reasonable window first.
-      script: `
-        const Calendar = Application('Calendar');
-        const start = new Date(INPUT.startIso);
-        const end = new Date(INPUT.endIso);
-        const wantName = INPUT.calendarName;
-        const limit = INPUT.limit;
-
-        const cals = Calendar.calendars();
-        const matchingCals = wantName
-          ? cals.filter(c => c.name() === wantName)
-          : cals;
-        if (wantName && matchingCals.length === 0) {
-          throw new Error("Calendar not found: " + wantName);
-        }
-
-        const out = [];
-        for (let i = 0; i < matchingCals.length && out.length < limit; i++) {
-          const cal = matchingCals[i];
-          let evs;
-          try {
-            evs = cal.events.whose({
-              _and: [
-                { startDate: { _greaterThan: start } },
-                { startDate: { _lessThan: end } },
-              ],
-            })();
-          } catch (e) {
-            // Some calendars (e.g. read-only subscriptions) reject whose().
-            // Fall back to scanning all events.
-            evs = cal.events();
-          }
-          for (let j = 0; j < evs.length && out.length < limit; j++) {
-            const ev = evs[j];
-            let sd = null, ed = null;
-            try { sd = ev.startDate(); } catch (_) {}
-            try { ed = ev.endDate(); } catch (_) {}
-            if (sd && (sd < start || sd >= end)) continue;
-            out.push({
-              id: ev.uid(),
-              summary: ev.summary() || "",
-              startDate: sd ? sd.toISOString() : null,
-              endDate: ed ? ed.toISOString() : null,
-              allDay: !!ev.alldayEvent(),
-              location: ev.location() || null,
-              description: ev.description() || null,
-              calendarName: cal.name(),
-              url: ev.url() || null,
-            });
-          }
-        }
-
-        out.sort((a, b) => {
-          const ax = a.startDate || "";
-          const bx = b.startDate || "";
-          return ax < bx ? -1 : ax > bx ? 1 : 0;
-        });
-        return out;
-      `,
+    const events = await runHelper<RawEvent[]>("list-events", {
+      startIso: params.start_date,
+      endIso: params.end_date,
+      calendarName: params.calendar_name ?? null,
+      limit: params.limit,
     });
 
     const structured = {
@@ -205,7 +111,6 @@ async function listEvents(params: z.infer<typeof ListEventsInput>) {
       calendar_name: params.calendar_name ?? null,
       events,
     };
-
     const md = [
       `# Events ${params.start_date} → ${params.end_date}` +
         (params.calendar_name ? ` in \`${params.calendar_name}\`` : ""),
@@ -221,7 +126,6 @@ async function listEvents(params: z.infer<typeof ListEventsInput>) {
             )
             .join("\n"),
     ].join("\n");
-
     return buildResult(params.response_format, md, structured);
   } catch (e) {
     return errorResult(e);
@@ -229,7 +133,7 @@ async function listEvents(params: z.infer<typeof ListEventsInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_search_events                                                      */
+/* search_events                                                      */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const SearchEventsInput = z
@@ -242,10 +146,10 @@ const SearchEventsInput = z
         "Text to search for in event summary, location, or description (case-insensitive substring match).",
       ),
     start_date: optionalIsoDateField.describe(
-      "Optional. Narrow the search to events starting on/after this date.",
+      "Optional. Narrow the search to events starting on/after this date. Defaults to one year ago.",
     ),
     end_date: optionalIsoDateField.describe(
-      "Optional. Narrow the search to events starting before this date.",
+      "Optional. Narrow the search to events starting before this date. Defaults to one year ahead.",
     ),
     calendar_name: z.string().min(1).optional(),
     limit: limitField,
@@ -255,77 +159,24 @@ const SearchEventsInput = z
 
 async function searchEvents(params: z.infer<typeof SearchEventsInput>) {
   try {
-    const events = await runJxa<RawEvent[]>({
-      args: {
-        query: params.query.toLowerCase(),
-        startIso: params.start_date ?? null,
-        endIso: params.end_date ?? null,
-        calendarName: params.calendar_name ?? null,
-        limit: params.limit,
-      },
-      script: `
-        const Calendar = Application('Calendar');
-        const q = INPUT.query;
-        const start = INPUT.startIso ? new Date(INPUT.startIso) : null;
-        const end = INPUT.endIso ? new Date(INPUT.endIso) : null;
-        const wantName = INPUT.calendarName;
-        const limit = INPUT.limit;
-
-        const cals = Calendar.calendars();
-        const matchingCals = wantName
-          ? cals.filter(c => c.name() === wantName)
-          : cals;
-
-        const out = [];
-        for (let i = 0; i < matchingCals.length && out.length < limit; i++) {
-          const cal = matchingCals[i];
-          let evs;
-          try {
-            if (start && end) {
-              evs = cal.events.whose({
-                _and: [
-                  { startDate: { _greaterThan: start } },
-                  { startDate: { _lessThan: end } },
-                ],
-              })();
-            } else {
-              evs = cal.events();
-            }
-          } catch (_) {
-            evs = cal.events();
-          }
-          for (let j = 0; j < evs.length && out.length < limit; j++) {
-            const ev = evs[j];
-            const summary = (ev.summary() || "").toLowerCase();
-            const location = (ev.location() || "").toLowerCase();
-            const description = (ev.description() || "").toLowerCase();
-            if (
-              !summary.includes(q) &&
-              !location.includes(q) &&
-              !description.includes(q)
-            ) continue;
-            let sd = null, ed = null;
-            try { sd = ev.startDate(); } catch (_) {}
-            try { ed = ev.endDate(); } catch (_) {}
-            if (start && sd && sd < start) continue;
-            if (end && sd && sd >= end) continue;
-            out.push({
-              id: ev.uid(),
-              summary: ev.summary() || "",
-              startDate: sd ? sd.toISOString() : null,
-              endDate: ed ? ed.toISOString() : null,
-              allDay: !!ev.alldayEvent(),
-              location: ev.location() || null,
-              description: ev.description() || null,
-              calendarName: cal.name(),
-              url: ev.url() || null,
-            });
-          }
-        }
-        out.sort((a, b) => (a.startDate || "") < (b.startDate || "") ? -1 : 1);
-        return out;
-      `,
+    // EventKit requires a bounded window; default to ±1 year when unspecified.
+    const start = params.start_date ?? isoDaysFromNow(-365);
+    const end = params.end_date ?? isoDaysFromNow(365);
+    const all = await runHelper<RawEvent[]>("list-events", {
+      startIso: start,
+      endIso: end,
+      calendarName: params.calendar_name ?? null,
+      limit: 5000,
     });
+    const q = params.query.toLowerCase();
+    const events = all
+      .filter(
+        (e) =>
+          (e.summary || "").toLowerCase().includes(q) ||
+          (e.location || "").toLowerCase().includes(q) ||
+          (e.description || "").toLowerCase().includes(q),
+      )
+      .slice(0, params.limit);
 
     const structured = { query: params.query, count: events.length, events };
     const md = [
@@ -343,7 +194,7 @@ async function searchEvents(params: z.infer<typeof SearchEventsInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_get_event                                                          */
+/* get_event                                                          */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const GetEventInput = z
@@ -351,52 +202,22 @@ const GetEventInput = z
     event_id: z
       .string()
       .min(1)
-      .describe("The event's UID (returned by other Calendar tools)."),
+      .describe("The event's identifier (returned by other Calendar tools)."),
     response_format: responseFormatField,
   })
   .strict();
 
 async function getEvent(params: z.infer<typeof GetEventInput>) {
   try {
-    const event = await runJxa<RawEvent | null>({
-      args: { eventId: params.event_id },
-      script: `
-        const Calendar = Application('Calendar');
-        const id = INPUT.eventId;
-        const cals = Calendar.calendars();
-        for (let i = 0; i < cals.length; i++) {
-          const cal = cals[i];
-          let evs;
-          try { evs = cal.events.whose({ uid: id })(); } catch (_) { evs = []; }
-          if (evs && evs.length > 0) {
-            const ev = evs[0];
-            let sd = null, ed = null;
-            try { sd = ev.startDate(); } catch (_) {}
-            try { ed = ev.endDate(); } catch (_) {}
-            return {
-              id: ev.uid(),
-              summary: ev.summary() || "",
-              startDate: sd ? sd.toISOString() : null,
-              endDate: ed ? ed.toISOString() : null,
-              allDay: !!ev.alldayEvent(),
-              location: ev.location() || null,
-              description: ev.description() || null,
-              calendarName: cal.name(),
-              url: ev.url() || null,
-            };
-          }
-        }
-        return null;
-      `,
+    const event = await runHelper<RawEvent | null>("get-event", {
+      id: params.event_id,
     });
-
     if (!event) {
       return errorResult(
         new Error(`No event found with id '${params.event_id}'`),
-        "Use apple_list_events or apple_search_events to discover valid IDs.",
+        "Use action 'list_events' or 'search_events' to discover valid IDs.",
       );
     }
-
     const md = [
       `# ${event.summary}`,
       "",
@@ -411,7 +232,6 @@ async function getEvent(params: z.infer<typeof GetEventInput>) {
     ]
       .filter(Boolean)
       .join("\n");
-
     return buildResult(params.response_format, md, event);
   } catch (e) {
     return errorResult(e);
@@ -419,7 +239,7 @@ async function getEvent(params: z.infer<typeof GetEventInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_create_event                                                       */
+/* create_event                                                       */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const CreateEventInput = z
@@ -428,7 +248,7 @@ const CreateEventInput = z
       .string()
       .min(1)
       .describe(
-        "The calendar to add the event to. Use apple_list_calendars to discover names.",
+        "The calendar to add the event to. Use action 'list_calendars' to discover names.",
       ),
     summary: z.string().min(1).max(500).describe("Event title."),
     start_date: isoDateField,
@@ -446,41 +266,16 @@ const CreateEventInput = z
 
 async function createEvent(params: z.infer<typeof CreateEventInput>) {
   try {
-    const result = await runJxa<{ id: string }>({
-      args: {
-        calendarName: params.calendar_name,
-        summary: params.summary,
-        startIso: params.start_date,
-        endIso: params.end_date,
-        allDay: params.all_day,
-        location: params.location ?? null,
-        description: params.description ?? null,
-        url: params.url ?? null,
-      },
-      script: `
-        const Calendar = Application('Calendar');
-        const cals = Calendar.calendars.whose({ name: INPUT.calendarName })();
-        if (cals.length === 0) {
-          throw new Error("Calendar not found: " + INPUT.calendarName);
-        }
-        const cal = cals[0];
-
-        const props = {
-          summary: INPUT.summary,
-          startDate: new Date(INPUT.startIso),
-          endDate: new Date(INPUT.endIso),
-          alldayEvent: !!INPUT.allDay,
-        };
-        if (INPUT.location) props.location = INPUT.location;
-        if (INPUT.description) props.description = INPUT.description;
-        if (INPUT.url) props.url = INPUT.url;
-
-        const ev = Calendar.Event(props);
-        cal.events.push(ev);
-        return { id: ev.uid() };
-      `,
+    const result = await runHelper<{ id: string }>("create-event", {
+      calendarName: params.calendar_name,
+      summary: params.summary,
+      startIso: params.start_date,
+      endIso: params.end_date,
+      allDay: params.all_day,
+      location: params.location ?? null,
+      description: params.description ?? null,
+      url: params.url ?? null,
     });
-
     const structured = { created: true, id: result.id, ...params };
     const md =
       `Created event **${params.summary}** in **${params.calendar_name}**\n\n` +
@@ -494,12 +289,12 @@ async function createEvent(params: z.infer<typeof CreateEventInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_update_event                                                       */
+/* update_event                                                       */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const UpdateEventInput = z
   .object({
-    event_id: z.string().min(1).describe("The event UID to update."),
+    event_id: z.string().min(1).describe("The event identifier to update."),
     summary: z.string().min(1).max(500).optional(),
     start_date: optionalIsoDateField,
     end_date: optionalIsoDateField,
@@ -528,38 +323,15 @@ async function updateEvent(params: z.infer<typeof UpdateEventInput>) {
     );
   }
   try {
-    const ok = await runJxa<{ updated: boolean }>({
-      args: {
-        eventId: params.event_id,
-        summary: params.summary ?? null,
-        startIso: params.start_date ?? null,
-        endIso: params.end_date ?? null,
-        allDay: params.all_day ?? null,
-        location: params.location ?? null,
-        description: params.description ?? null,
-        url: params.url ?? null,
-      },
-      script: `
-        const Calendar = Application('Calendar');
-        const cals = Calendar.calendars();
-        for (let i = 0; i < cals.length; i++) {
-          const cal = cals[i];
-          let evs;
-          try { evs = cal.events.whose({ uid: INPUT.eventId })(); } catch (_) { evs = []; }
-          if (evs.length > 0) {
-            const ev = evs[0];
-            if (INPUT.summary !== null) ev.summary = INPUT.summary;
-            if (INPUT.startIso !== null) ev.startDate = new Date(INPUT.startIso);
-            if (INPUT.endIso !== null) ev.endDate = new Date(INPUT.endIso);
-            if (INPUT.allDay !== null) ev.alldayEvent = !!INPUT.allDay;
-            if (INPUT.location !== null) ev.location = INPUT.location;
-            if (INPUT.description !== null) ev.description = INPUT.description;
-            if (INPUT.url !== null) ev.url = INPUT.url;
-            return { updated: true };
-          }
-        }
-        throw new Error("Event not found: " + INPUT.eventId);
-      `,
+    const ok = await runHelper<{ updated: boolean }>("update-event", {
+      id: params.event_id,
+      summary: params.summary ?? null,
+      startIso: params.start_date ?? null,
+      endIso: params.end_date ?? null,
+      allDay: params.all_day ?? null,
+      location: params.location ?? null,
+      description: params.description ?? null,
+      url: params.url ?? null,
     });
     return buildResult(
       params.response_format,
@@ -572,7 +344,7 @@ async function updateEvent(params: z.infer<typeof UpdateEventInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_delete_event                                                       */
+/* delete_event                                                       */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const DeleteEventInput = z
@@ -589,22 +361,8 @@ const DeleteEventInput = z
 
 async function deleteEvent(params: z.infer<typeof DeleteEventInput>) {
   try {
-    const ok = await runJxa<{ deleted: boolean }>({
-      args: { eventId: params.event_id },
-      script: `
-        const Calendar = Application('Calendar');
-        const cals = Calendar.calendars();
-        for (let i = 0; i < cals.length; i++) {
-          const cal = cals[i];
-          let evs;
-          try { evs = cal.events.whose({ uid: INPUT.eventId })(); } catch (_) { evs = []; }
-          if (evs.length > 0) {
-            Calendar.delete(evs[0]);
-            return { deleted: true };
-          }
-        }
-        throw new Error("Event not found: " + INPUT.eventId);
-      `,
+    const ok = await runHelper<{ deleted: boolean }>("delete-event", {
+      id: params.event_id,
     });
     return buildResult(
       params.response_format,
@@ -620,116 +378,79 @@ async function deleteEvent(params: z.infer<typeof DeleteEventInput>) {
 /* Registration                                                             */
 /* ──────────────────────────────────────────────────────────────────────── */
 
+const calendarAction = z
+  .enum([
+    "list_calendars",
+    "list_events",
+    "search_events",
+    "get_event",
+    "create_event",
+    "update_event",
+    "delete_event",
+  ])
+  .describe(
+    [
+      "Which Calendar operation to perform. Required fields per action:",
+      "• list_calendars — (no other fields)",
+      "• list_events — start_date, end_date; optional calendar_name, limit",
+      "• search_events — query; optional start_date, end_date, calendar_name, limit",
+      "• get_event — event_id",
+      "• create_event — calendar_name, summary, start_date, end_date; optional all_day, location, description, url",
+      "• update_event — event_id + at least one of summary/start_date/end_date/all_day/location/description/url",
+      "• delete_event — event_id, confirm=true",
+    ].join("\n"),
+  );
+
+const CalendarToolInput = z.object(
+  consolidatedShape(calendarAction, [
+    ListCalendarsInput,
+    ListEventsInput,
+    SearchEventsInput,
+    GetEventInput,
+    CreateEventInput,
+    UpdateEventInput,
+    DeleteEventInput,
+  ]),
+);
+
+async function dispatchCalendar(raw: z.infer<typeof CalendarToolInput>) {
+  try {
+    switch (raw.action) {
+      case "list_calendars":
+        return await listCalendars(parseAction(ListCalendarsInput, raw));
+      case "list_events":
+        return await listEvents(parseAction(ListEventsInput, raw));
+      case "search_events":
+        return await searchEvents(parseAction(SearchEventsInput, raw));
+      case "get_event":
+        return await getEvent(parseAction(GetEventInput, raw));
+      case "create_event":
+        return await createEvent(parseAction(CreateEventInput, raw));
+      case "update_event":
+        return await updateEvent(parseAction(UpdateEventInput, raw));
+      case "delete_event":
+        return await deleteEvent(parseAction(DeleteEventInput, raw));
+      default:
+        return errorResult(
+          new Error(`Unknown calendar action: ${String(raw.action)}`),
+        );
+    }
+  } catch (e) {
+    return errorResult(e);
+  }
+}
+
 export function registerCalendarTools(server: McpServer) {
   server.registerTool(
-    "apple_list_calendars",
+    "calendar",
     {
-      title: "List Calendars",
+      title: "Calendar",
       description:
-        "List every calendar configured in Calendar.app (local, iCloud, Google, Exchange, subscriptions). Returns each calendar's name, UID, writable flag, and color. Use this first to discover the `calendar_name` values that other tools accept.",
-      inputSchema: ListCalendarsInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    listCalendars,
-  );
-
-  server.registerTool(
-    "apple_list_events",
-    {
-      title: "List Calendar Events",
-      description:
-        "List Calendar.app events that start within a date range, optionally filtered to a single calendar. Returns id, summary, start/end ISO timestamps, all-day flag, location, description, calendar name, and URL. Date range is half-open: events with start ≥ start_date and start < end_date are returned. Use apple_get_event to fetch a single event by id.",
-      inputSchema: ListEventsInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    listEvents,
-  );
-
-  server.registerTool(
-    "apple_search_events",
-    {
-      title: "Search Calendar Events",
-      description:
-        "Case-insensitive substring search across event summary, location, and description. Optionally narrow by date range and/or calendar. Results are capped by `limit` for performance — refine your query if you hit the cap.",
-      inputSchema: SearchEventsInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    searchEvents,
-  );
-
-  server.registerTool(
-    "apple_get_event",
-    {
-      title: "Get Calendar Event",
-      description:
-        "Fetch a single event by its UID. The UID is the `id` field returned by apple_list_events / apple_search_events.",
-      inputSchema: GetEventInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    getEvent,
-  );
-
-  server.registerTool(
-    "apple_create_event",
-    {
-      title: "Create Calendar Event",
-      description:
-        "Create a new event in the named calendar. Required: calendar_name, summary, start_date, end_date. For an all-day event set all_day=true and use date-only ISO strings (YYYY-MM-DD). Returns the new event's UID.",
-      inputSchema: CreateEventInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    createEvent,
-  );
-
-  server.registerTool(
-    "apple_update_event",
-    {
-      title: "Update Calendar Event",
-      description:
-        "Update one or more fields of an existing event. Only the fields you supply are changed. The event_id is the UID returned by other Calendar tools.",
-      inputSchema: UpdateEventInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    updateEvent,
-  );
-
-  server.registerTool(
-    "apple_delete_event",
-    {
-      title: "Delete Calendar Event",
-      description:
-        "Permanently delete an event. This cannot be undone. Pass the event's UID. You MUST pass confirm=true to acknowledge.",
-      inputSchema: DeleteEventInput.shape,
+        "Read and manage Calendar.app events. Pick an operation with `action`: " +
+        "list_calendars, list_events, search_events, get_event, create_event, " +
+        "update_event, delete_event. See the `action` field for the parameters " +
+        "each operation needs. Destructive actions (delete_event) require confirm=true.",
+      inputSchema: CalendarToolInput.shape,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -737,6 +458,6 @@ export function registerCalendarTools(server: McpServer) {
         openWorldHint: true,
       },
     },
-    deleteEvent,
+    dispatchCalendar,
   );
 }

@@ -12,6 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SERVER_NAME, SERVER_VERSION } from "./constants.js";
 import { registerCalendarTools } from "./tools/calendar.js";
 import { registerContactTools } from "./tools/contacts.js";
+import { registerImessageTools } from "./tools/imessage.js";
 import { registerMailTools } from "./tools/mail.js";
 import { registerReminderTools } from "./tools/reminders.js";
 
@@ -37,9 +38,10 @@ async function main() {
   registerReminderTools(server);
   registerContactTools(server);
   registerMailTools(server);
+  registerImessageTools(server);
 
   log(
-    `${SERVER_NAME} v${SERVER_VERSION} starting (Calendar + Reminders + Contacts + Mail)`,
+    `${SERVER_NAME} v${SERVER_VERSION} starting (Calendar + Reminders + Contacts + Mail + iMessage)`,
   );
 
   const transport = new StdioServerTransport();

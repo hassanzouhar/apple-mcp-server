@@ -3,18 +3,49 @@
   "manifest_version": "0.4",
   "name": "apple-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for Apple Calendar, Reminders, Contacts, and Mail via AppleScript/JXA.",
-  "author": { "name": "haz", "email": "hassan.zouhar@icloud.com" },
+  "description": "MCP server for Apple Calendar, Reminders, Contacts, Mail, and iMessage. One tool per app, each with an `action` parameter. Reading Mail and iMessage requires Full Disk Access.",
+  "author": {
+    "name": "haz",
+    "email": "hassan.zouhar@icloud.com"
+  },
   "server": {
     "type": "node",
     "entry_point": "server/index.js",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server/index.js"]
+      "args": [
+        "${__dirname}/server/index.js"
+      ]
     }
   },
+  "tools": [
+    {
+      "name": "calendar",
+      "description": "Read and manage Calendar.app events. Actions: list_calendars, list_events, search_events, get_event, create_event, update_event, delete_event (confirm=true)."
+    },
+    {
+      "name": "reminders",
+      "description": "Read and manage Reminders.app. Actions: list_lists, list, search, create, update, complete, delete (confirm=true), create_list."
+    },
+    {
+      "name": "contacts",
+      "description": "Read and manage Contacts.app. Actions: search, get, create, update, delete (confirm=true)."
+    },
+    {
+      "name": "mail",
+      "description": "Read and manage Mail.app email. Actions: list_accounts, list_mailboxes, list_messages, search, get, send (confirm=true), create_draft, mark, delete (confirm=true). Reading uses Mail's index (Full Disk Access)."
+    },
+    {
+      "name": "imessage",
+      "description": "Read and send iMessage/SMS via Messages.app. Actions: list_chats, list_messages, search, send (confirm=true). Reading requires Full Disk Access."
+    }
+  ],
   "compatibility": {
-    "platforms": ["darwin"],
-    "runtimes": { "node": ">=18" }
+    "platforms": [
+      "darwin"
+    ],
+    "runtimes": {
+      "node": ">=18"
+    }
   }
 }

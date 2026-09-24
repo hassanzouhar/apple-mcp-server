@@ -22,3 +22,6 @@ export const DEFAULT_OSASCRIPT_TIMEOUT_MS = 30_000;
 
 /** Longer timeout for Mail operations which can be very slow. */
 export const MAIL_OSASCRIPT_TIMEOUT_MS = 60_000;
+
+/** Timeout for Messages.app (iMessage) send operations. */
+export const MESSAGES_OSASCRIPT_TIMEOUT_MS = 30_000;

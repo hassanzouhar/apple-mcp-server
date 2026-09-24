@@ -1,8 +1,10 @@
-# The bundle ships only manifest.json + the self-contained server/index.js
-# (esbuild output). Exclude all dev/build inputs and tooling.
+# The bundle ships manifest.json + the self-contained server/index.js
+# (esbuild output) + the compiled server/bin/eventkit-helper. Exclude all
+# dev/build inputs and tooling, including the Swift source under eventkit/.
 node_modules/
 src/
 dist/
+eventkit/
 *.map
 *.tsbuildinfo
 package.json

@@ -11,7 +11,9 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node18 --outfile=server/index.js --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
+    "bundle": "npm run build:helper && esbuild src/index.ts --bundle --platform=node --format=esm --target=node18 --outfile=server/index.js --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
+    "build:helper": "mkdir -p server/bin && swiftc -O -framework EventKit -framework Foundation -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker eventkit/Info.plist eventkit/helper.swift -o server/bin/eventkit-helper",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "clean": "rm -rf dist server"
   },
   "engines": {

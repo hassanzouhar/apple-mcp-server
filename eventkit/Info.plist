@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.apple-mcp-server.eventkit-helper</string>
+  <key>CFBundleName</key>
+  <string>apple-mcp-server EventKit helper</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>apple-mcp-server reads and edits your Calendar events on your behalf.</string>
+  <key>NSRemindersFullAccessUsageDescription</key>
+  <string>apple-mcp-server reads and edits your Reminders on your behalf.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>apple-mcp-server reads and edits your Calendar events on your behalf.</string>
+  <key>NSRemindersUsageDescription</key>
+  <string>apple-mcp-server reads and edits your Reminders on your behalf.</string>
+</dict>
+</plist>

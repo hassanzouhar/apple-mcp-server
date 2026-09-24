@@ -17,6 +17,7 @@ import {
   humanDate,
 } from "../services/format.js";
 import { runJxa } from "../services/osascript.js";
+import { consolidatedShape, parseAction } from "./dispatch.js";
 
 /* ──────────────────────────────────────────────────────────────────────── */
 /* Types                                                                    */
@@ -53,7 +54,7 @@ interface RawContact {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_search_contacts                                                    */
+/* search_contacts                                                    */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const SearchContactsInput = z
@@ -160,7 +161,7 @@ function formatContactBullet(c: RawContact): string {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_get_contact                                                        */
+/* get_contact                                                        */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const GetContactInput = z
@@ -217,7 +218,7 @@ async function getContact(params: z.infer<typeof GetContactInput>) {
     if (!contact) {
       return errorResult(
         new Error(`No contact found with id '${params.contact_id}'`),
-        "Use apple_search_contacts to discover valid IDs.",
+        "Use action 'search' to discover valid IDs.",
       );
     }
 
@@ -253,7 +254,7 @@ async function getContact(params: z.infer<typeof GetContactInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_create_contact                                                     */
+/* create_contact                                                     */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const EmailEntrySchema = z
@@ -349,7 +350,7 @@ async function createContact(params: z.infer<typeof CreateContactInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_update_contact                                                     */
+/* update_contact                                                     */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const UpdateContactInput = z
@@ -414,7 +415,7 @@ async function updateContact(params: z.infer<typeof UpdateContactInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_delete_contact                                                     */
+/* delete_contact                                                     */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const DeleteContactInput = z
@@ -456,82 +457,63 @@ async function deleteContact(params: z.infer<typeof DeleteContactInput>) {
 /* Registration                                                             */
 /* ──────────────────────────────────────────────────────────────────────── */
 
+const contactsAction = z
+  .enum(["search", "get", "create", "update", "delete"])
+  .describe(
+    [
+      "Which Contacts operation to perform. Required fields per action:",
+      "• search — query; optional limit",
+      "• get — contact_id",
+      "• create — at least one of first_name/last_name/organization/emails/phones; optional job_title, note",
+      "• update — contact_id + at least one of first_name/last_name/organization/job_title/note",
+      "• delete — contact_id, confirm=true",
+    ].join("\n"),
+  );
+
+const ContactsToolInput = z.object(
+  consolidatedShape(contactsAction, [
+    SearchContactsInput,
+    GetContactInput,
+    CreateContactInput,
+    UpdateContactInput,
+    DeleteContactInput,
+  ]),
+);
+
+async function dispatchContacts(raw: z.infer<typeof ContactsToolInput>) {
+  try {
+    switch (raw.action) {
+      case "search":
+        return await searchContacts(parseAction(SearchContactsInput, raw));
+      case "get":
+        return await getContact(parseAction(GetContactInput, raw));
+      case "create":
+        return await createContact(parseAction(CreateContactInput, raw));
+      case "update":
+        return await updateContact(parseAction(UpdateContactInput, raw));
+      case "delete":
+        return await deleteContact(parseAction(DeleteContactInput, raw));
+      default:
+        return errorResult(
+          new Error(`Unknown contacts action: ${String(raw.action)}`),
+        );
+    }
+  } catch (e) {
+    return errorResult(e);
+  }
+}
+
 export function registerContactTools(server: McpServer) {
   server.registerTool(
-    "apple_search_contacts",
+    "contacts",
     {
-      title: "Search Contacts",
+      title: "Contacts",
       description:
-        "Search Contacts.app for people whose name, organization, email, or phone matches the query (case-insensitive substring). Returns id, name, organization, job title, emails (with labels), phones (with labels), addresses, birth date, and note.",
-      inputSchema: SearchContactsInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    searchContacts,
-  );
-
-  server.registerTool(
-    "apple_get_contact",
-    {
-      title: "Get Contact",
-      description:
-        "Fetch a single contact by its vCard UID (the `id` returned by apple_search_contacts).",
-      inputSchema: GetContactInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    getContact,
-  );
-
-  server.registerTool(
-    "apple_create_contact",
-    {
-      title: "Create Contact",
-      description:
-        "Create a new contact card. At least one of first_name, last_name, organization, emails, or phones must be provided. Each email/phone entry takes a label ('work', 'home', 'mobile', etc.) and a value.",
-      inputSchema: CreateContactInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    createContact,
-  );
-
-  server.registerTool(
-    "apple_update_contact",
-    {
-      title: "Update Contact",
-      description:
-        "Update top-level fields of an existing contact (first_name, last_name, organization, job_title, note). Email and phone editing are not supported by this tool — delete and recreate the contact, or edit in Contacts.app.",
-      inputSchema: UpdateContactInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    updateContact,
-  );
-
-  server.registerTool(
-    "apple_delete_contact",
-    {
-      title: "Delete Contact",
-      description:
-        "Permanently delete a contact. This cannot be undone. You MUST pass confirm=true to acknowledge.",
-      inputSchema: DeleteContactInput.shape,
+        "Read and manage Contacts.app. Pick an operation with `action`: " +
+        "search, get, create, update, delete. See the `action` field for the " +
+        "parameters each operation needs. Note: update changes only top-level " +
+        "fields (not emails/phones). Destructive actions (delete) require confirm=true.",
+      inputSchema: ContactsToolInput.shape,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -539,6 +521,6 @@ export function registerContactTools(server: McpServer) {
         openWorldHint: true,
       },
     },
-    deleteContact,
+    dispatchContacts,
   );
 }

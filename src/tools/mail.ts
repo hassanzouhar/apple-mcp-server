@@ -26,6 +26,14 @@ import {
   humanDate,
 } from "../services/format.js";
 import { runJxa } from "../services/osascript.js";
+import {
+  MailStoreUnavailable,
+  listMailboxes as storeListMailboxes,
+  listMessages as storeListMessages,
+  searchMessages as storeSearchMessages,
+  getMessageMeta as storeGetMessageMeta,
+} from "../services/mailstore.js";
+import { consolidatedShape, parseAction } from "./dispatch.js";
 
 /* ──────────────────────────────────────────────────────────────────────── */
 /* Types                                                                    */
@@ -61,7 +69,7 @@ interface RawMessage extends RawMessageSummary {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_list_mail_accounts                                                 */
+/* list_mail_accounts                                                 */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const ListAccountsInput = z
@@ -100,7 +108,7 @@ async function listAccounts(params: z.infer<typeof ListAccountsInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_list_mailboxes                                                     */
+/* list_mailboxes                                                     */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const ListMailboxesInput = z
@@ -110,13 +118,40 @@ const ListMailboxesInput = z
       .min(1)
       .optional()
       .describe(
-        "Optional. Limit to one account's mailboxes. Use apple_list_mail_accounts to discover.",
+        "Optional. Limit to one account's mailboxes. Use action 'list_accounts' to discover.",
       ),
     response_format: responseFormatField,
   })
   .strict();
 
 async function listMailboxes(params: z.infer<typeof ListMailboxesInput>) {
+  try {
+    let boxes: RawMailbox[];
+    try {
+      boxes = await storeListMailboxes(params.account_name ?? null);
+    } catch (e) {
+      if (e instanceof MailStoreUnavailable) return listMailboxesViaJxa(params);
+      throw e;
+    }
+    const md = [
+      `# Mailboxes (${boxes.length})`,
+      "",
+      ...boxes.map(
+        (b) =>
+          `- **${b.name}**${b.accountName ? ` _(${b.accountName})_` : ""}` +
+          (b.unreadCount > 0 ? ` — ${b.unreadCount} unread` : ""),
+      ),
+    ].join("\n");
+    return buildResult(params.response_format, md, {
+      count: boxes.length,
+      mailboxes: boxes,
+    });
+  } catch (e) {
+    return errorResult(e);
+  }
+}
+
+async function listMailboxesViaJxa(params: z.infer<typeof ListMailboxesInput>) {
   try {
     const boxes = await runJxa<RawMailbox[]>({
       args: { accountName: params.account_name ?? null },
@@ -162,7 +197,7 @@ async function listMailboxes(params: z.infer<typeof ListMailboxesInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_list_messages                                                      */
+/* list_messages                                                      */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const ListMessagesInput = z
@@ -171,7 +206,7 @@ const ListMessagesInput = z
       .string()
       .min(1)
       .describe(
-        "Name of the mailbox to list from (e.g. 'INBOX'). Use apple_list_mailboxes to discover.",
+        "Name of the mailbox to list from (e.g. 'INBOX'). Use action 'list_mailboxes' to discover.",
       ),
     account_name: z
       .string()
@@ -192,7 +227,52 @@ const ListMessagesInput = z
   })
   .strict();
 
+function renderMessageList(
+  title: string,
+  msgs: RawMessageSummary[],
+): string {
+  return [
+    title,
+    "",
+    ...msgs.map(
+      (m) =>
+        `- ${m.read ? "📭" : "📬"} **${clip(m.subject || "(no subject)", 70)}** ` +
+        `_from ${clip(m.sender, 40)}_ — ${humanDate(m.dateSent)} — id: \`${m.id}\``,
+    ),
+  ].join("\n");
+}
+
 async function listMessages(params: z.infer<typeof ListMessagesInput>) {
+  try {
+    let msgs: RawMessageSummary[];
+    try {
+      msgs = await storeListMessages({
+        mailboxName: params.mailbox_name,
+        accountName: params.account_name ?? null,
+        unreadOnly: params.unread_only,
+        since: params.since ?? null,
+        until: params.until ?? null,
+        limit: params.limit,
+      });
+    } catch (e) {
+      if (e instanceof MailStoreUnavailable) return listMessagesViaJxa(params);
+      throw e;
+    }
+    const md = renderMessageList(
+      `# Messages in \`${params.mailbox_name}\`${params.account_name ? ` _(${params.account_name})_` : ""} — ${msgs.length}`,
+      msgs,
+    );
+    return buildResult(params.response_format, md, {
+      count: msgs.length,
+      mailbox_name: params.mailbox_name,
+      messages: msgs,
+    });
+  } catch (e) {
+    return errorResult(e);
+  }
+}
+
+async function listMessagesViaJxa(params: z.infer<typeof ListMessagesInput>) {
   try {
     const msgs = await runJxa<RawMessageSummary[]>({
       args: {
@@ -272,7 +352,7 @@ async function listMessages(params: z.infer<typeof ListMessagesInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_search_messages                                                    */
+/* search_messages                                                    */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const SearchMessagesInput = z
@@ -307,6 +387,38 @@ const SearchMessagesInput = z
   .strict();
 
 async function searchMessages(params: z.infer<typeof SearchMessagesInput>) {
+  try {
+    let msgs: RawMessageSummary[];
+    try {
+      msgs = await storeSearchMessages({
+        query: params.query,
+        mailboxName: params.mailbox_name ?? null,
+        accountName: params.account_name ?? null,
+        limit: params.limit,
+      });
+    } catch (e) {
+      if (e instanceof MailStoreUnavailable) return searchMessagesViaJxa(params);
+      throw e;
+    }
+    const md = [
+      `# Mail search: \`${params.query}\` (${msgs.length})`,
+      "",
+      ...msgs.map(
+        (m) =>
+          `- **${clip(m.subject || "(no subject)", 70)}** _from ${clip(m.sender, 40)}_ — ${humanDate(m.dateSent)} _(${m.mailbox})_ — id: \`${m.id}\``,
+      ),
+    ].join("\n");
+    return buildResult(params.response_format, md, {
+      query: params.query,
+      count: msgs.length,
+      messages: msgs,
+    });
+  } catch (e) {
+    return errorResult(e);
+  }
+}
+
+async function searchMessagesViaJxa(params: z.infer<typeof SearchMessagesInput>) {
   try {
     const msgs = await runJxa<RawMessageSummary[]>({
       args: {
@@ -377,7 +489,7 @@ async function searchMessages(params: z.infer<typeof SearchMessagesInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_get_message                                                        */
+/* get_message                                                        */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const GetMessageInput = z
@@ -386,7 +498,7 @@ const GetMessageInput = z
       .string()
       .min(1)
       .describe(
-        "The message id (the `id` returned by apple_list_messages / apple_search_messages).",
+        "The message id (the `id` returned by action 'list_messages' / 'search').",
       ),
     response_format: responseFormatField,
   })
@@ -394,19 +506,52 @@ const GetMessageInput = z
 
 async function getMessage(params: z.infer<typeof GetMessageInput>) {
   try {
+    // Use the Envelope Index (fast) to learn which account+mailbox holds this
+    // message, then point JXA straight at it. The full RFC822 body and the
+    // recipient lists only come from Mail.app, but a *targeted* fetch is cheap.
+    // Falls back to a full scan if the index is unavailable or the hint misses.
+    let accountHint: string | null = null;
+    let mailboxLeafHint: string | null = null;
+    try {
+      const meta = await storeGetMessageMeta(params.message_id);
+      if (meta) {
+        accountHint = meta.account;
+        mailboxLeafHint = meta.mailbox.split("/").pop() ?? null;
+      }
+    } catch (e) {
+      if (!(e instanceof MailStoreUnavailable)) throw e;
+      // index unavailable → proceed hint-less (full scan)
+    }
+
     const msg = await runJxa<RawMessage | null>({
-      args: { messageId: params.message_id },
+      args: {
+        messageId: params.message_id,
+        accountHint,
+        mailboxLeafHint,
+      },
       timeoutMs: MAIL_OSASCRIPT_TIMEOUT_MS,
       script: `
         const Mail = Application('Mail');
-        const accounts = Mail.accounts();
+        const idNum = Number(INPUT.messageId);
+        const id = Number.isInteger(idNum) ? idNum : INPUT.messageId;
+
+        let accounts = [];
+        if (INPUT.accountHint) {
+          try { accounts = Mail.accounts.whose({ name: INPUT.accountHint })(); } catch (_) {}
+        }
+        if (!accounts || accounts.length === 0) accounts = Mail.accounts();
+
         for (let i = 0; i < accounts.length; i++) {
           const a = accounts[i];
-          const boxes = a.mailboxes();
+          let boxes = [];
+          if (INPUT.mailboxLeafHint) {
+            try { boxes = a.mailboxes.whose({ name: INPUT.mailboxLeafHint })(); } catch (_) {}
+          }
+          if (!boxes || boxes.length === 0) boxes = a.mailboxes();
           for (let j = 0; j < boxes.length; j++) {
             const box = boxes[j];
             let matches;
-            try { matches = box.messages.whose({ id: INPUT.messageId })(); }
+            try { matches = box.messages.whose({ id: id })(); }
             catch (_) { matches = []; }
             if (matches.length > 0) {
               const m = matches[0];
@@ -463,7 +608,7 @@ async function getMessage(params: z.infer<typeof GetMessageInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_send_message                                                       */
+/* send_message                                                       */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const SendMessageInput = z
@@ -550,7 +695,7 @@ async function sendMessage(params: z.infer<typeof SendMessageInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_create_draft                                                       */
+/* create_draft                                                       */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const CreateDraftInput = z
@@ -606,7 +751,7 @@ async function createDraft(params: z.infer<typeof CreateDraftInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_mark_message                                                       */
+/* mark_message                                                       */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const MarkMessageInput = z
@@ -653,7 +798,7 @@ async function markMessage(params: z.infer<typeof MarkMessageInput>) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
-/* apple_delete_message                                                     */
+/* delete_message                                                     */
 /* ──────────────────────────────────────────────────────────────────────── */
 
 const DeleteMessageInput = z
@@ -705,99 +850,91 @@ async function deleteMessage(params: z.infer<typeof DeleteMessageInput>) {
 /* Registration                                                             */
 /* ──────────────────────────────────────────────────────────────────────── */
 
+const mailAction = z
+  .enum([
+    "list_accounts",
+    "list_mailboxes",
+    "list_messages",
+    "search",
+    "get",
+    "send",
+    "create_draft",
+    "mark",
+    "delete",
+  ])
+  .describe(
+    [
+      "Which Mail operation to perform. Required fields per action:",
+      "• list_accounts — (no other fields)",
+      "• list_mailboxes — optional account_name",
+      "• list_messages — mailbox_name; optional account_name, unread_only, since, until, limit",
+      "• search — query; optional mailbox_name, account_name, scan, limit",
+      "• get — message_id",
+      "• send — to[], subject, body, confirm=true; optional cc[], bcc[], from_account (sends IMMEDIATELY)",
+      "• create_draft — optional to[], cc[], bcc[], subject, body (opens an unsent draft)",
+      "• mark — message_id, read (true=read, false=unread)",
+      "• delete — message_id, confirm=true (moves to Trash)",
+    ].join("\n"),
+  );
+
+const MailToolInput = z.object(
+  consolidatedShape(mailAction, [
+    ListAccountsInput,
+    ListMailboxesInput,
+    ListMessagesInput,
+    SearchMessagesInput,
+    GetMessageInput,
+    SendMessageInput,
+    CreateDraftInput,
+    MarkMessageInput,
+    DeleteMessageInput,
+  ]),
+);
+
+async function dispatchMail(raw: z.infer<typeof MailToolInput>) {
+  try {
+    switch (raw.action) {
+      case "list_accounts":
+        return await listAccounts(parseAction(ListAccountsInput, raw));
+      case "list_mailboxes":
+        return await listMailboxes(parseAction(ListMailboxesInput, raw));
+      case "list_messages":
+        return await listMessages(parseAction(ListMessagesInput, raw));
+      case "search":
+        return await searchMessages(parseAction(SearchMessagesInput, raw));
+      case "get":
+        return await getMessage(parseAction(GetMessageInput, raw));
+      case "send":
+        return await sendMessage(parseAction(SendMessageInput, raw));
+      case "create_draft":
+        return await createDraft(parseAction(CreateDraftInput, raw));
+      case "mark":
+        return await markMessage(parseAction(MarkMessageInput, raw));
+      case "delete":
+        return await deleteMessage(parseAction(DeleteMessageInput, raw));
+      default:
+        return errorResult(
+          new Error(`Unknown mail action: ${String(raw.action)}`),
+        );
+    }
+  } catch (e) {
+    return errorResult(e);
+  }
+}
+
 export function registerMailTools(server: McpServer) {
   server.registerTool(
-    "apple_list_mail_accounts",
+    "mail",
     {
-      title: "List Mail Accounts",
+      title: "Mail",
       description:
-        "List every configured Mail.app account (iCloud, Gmail, Exchange, IMAP, etc.). Returns id, name, full name, and email addresses for each.",
-      inputSchema: ListAccountsInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    listAccounts,
-  );
-
-  server.registerTool(
-    "apple_list_mailboxes",
-    {
-      title: "List Mailboxes",
-      description:
-        "List mailboxes (folders) in Mail.app, optionally filtered to one account. Returns name, account, and unread count.",
-      inputSchema: ListMailboxesInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    listMailboxes,
-  );
-
-  server.registerTool(
-    "apple_list_messages",
-    {
-      title: "List Messages",
-      description:
-        "List recent messages from a mailbox (e.g. INBOX). Messages are returned newest-first. Supports unread-only filtering and a date window. NOTE: Mail can be slow on large mailboxes — keep `limit` modest and use `since`/`until` to narrow.",
-      inputSchema: ListMessagesInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    listMessages,
-  );
-
-  server.registerTool(
-    "apple_search_messages",
-    {
-      title: "Search Messages",
-      description:
-        "Search Mail messages by case-insensitive substring match against subject or sender across recent messages. Scans only the most-recent `scan` messages per mailbox for performance. Content is NOT searched — use Mail.app for full-text search.",
-      inputSchema: SearchMessagesInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    searchMessages,
-  );
-
-  server.registerTool(
-    "apple_get_message",
-    {
-      title: "Get Message",
-      description:
-        "Fetch the full body and metadata of a single message by id, including recipients, cc, sender, date, and content.",
-      inputSchema: GetMessageInput.shape,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    getMessage,
-  );
-
-  server.registerTool(
-    "apple_send_message",
-    {
-      title: "Send Email",
-      description:
-        "Send an email message via Mail.app. The message is sent IMMEDIATELY — there is no draft step. You MUST pass confirm=true to acknowledge this. Use apple_create_draft if you want a draft the user can review before sending.",
-      inputSchema: SendMessageInput.shape,
+        "Read and manage Mail.app email. Pick an operation with `action`: " +
+        "list_accounts, list_mailboxes, list_messages, search, get, send, " +
+        "create_draft, mark, delete. See the `action` field for the parameters " +
+        "each operation needs. `send` dispatches email IMMEDIATELY and requires " +
+        "confirm=true; use create_draft for a reviewable draft. `delete` (confirm=true) " +
+        "moves a message to Trash. NOTE: this is EMAIL — for iMessage/SMS use the `imessage` tool.",
+      inputSchema: MailToolInput.shape,
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -805,57 +942,6 @@ export function registerMailTools(server: McpServer) {
         openWorldHint: true,
       },
     },
-    sendMessage,
-  );
-
-  server.registerTool(
-    "apple_create_draft",
-    {
-      title: "Create Email Draft",
-      description:
-        "Open a new draft message in Mail.app with the supplied subject, body, and recipients. The draft is NOT sent — it is left open in Mail.app for the user to review and send manually.",
-      inputSchema: CreateDraftInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    createDraft,
-  );
-
-  server.registerTool(
-    "apple_mark_message",
-    {
-      title: "Mark Message Read/Unread",
-      description:
-        "Mark a message as read or unread. Pass read=true to mark as read, read=false to mark as unread.",
-      inputSchema: MarkMessageInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: true,
-      },
-    },
-    markMessage,
-  );
-
-  server.registerTool(
-    "apple_delete_message",
-    {
-      title: "Delete Message",
-      description:
-        "Move a message to Trash. You MUST pass confirm=true to acknowledge. The message is recoverable from Trash until Mail empties it.",
-      inputSchema: DeleteMessageInput.shape,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    deleteMessage,
+    dispatchMail,
   );
 }

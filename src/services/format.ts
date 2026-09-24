@@ -83,6 +83,27 @@ export function errorResult(err: unknown, hint?: string): ToolResult {
  * Translate raw errors into actionable messages for the agent.
  */
 export function describeError(err: unknown): string {
+  // Read-only SQLite stores (Mail's Envelope Index, Messages' chat.db) fail with
+  // a filesystem error when the host app lacks Full Disk Access. Surface that as
+  // an actionable hint rather than a raw sqlite3 message.
+  if (err instanceof Error) {
+    const lower = err.message.toLowerCase();
+    if (
+      lower.includes("unable to open database") ||
+      lower.includes("operation not permitted") ||
+      lower.includes("authorization denied") ||
+      (lower.includes("chat.db") && lower.includes("not found")) ||
+      lower.includes("envelope index was not found") ||
+      lower.includes("chat.db was not found")
+    ) {
+      return (
+        `Could not read the on-disk store. The host app (the process running this ` +
+        `MCP server — your terminal or Claude desktop) needs Full Disk Access: grant ` +
+        `it under System Settings → Privacy & Security → Full Disk Access, then restart ` +
+        `the app. Original: ${err.message}`
+      );
+    }
+  }
   if (err instanceof OsaScriptError) {
     const lower = (err.stderr || err.message).toLowerCase();
     if (lower.includes("not authorized") || lower.includes("not allowed assistive access") || lower.includes("-1743") || lower.includes("not allowed to send apple events")) {
