@@ -29,9 +29,16 @@ test("parseMailboxUrl degrades gracefully on a non-URL", () => {
 
 // ── Integration: real Envelope Index (skips if absent / no Full Disk Access) ──
 
-const haveMail = findEnvelopeIndex() !== null;
+let mailSkip: string | false = false;
+try {
+  if (!findEnvelopeIndex()) mailSkip = "Mail Envelope Index not found";
+} catch (error) {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code !== "EPERM" && code !== "EACCES") throw error;
+  mailSkip = "Mail store access denied; Full Disk Access required";
+}
 
-test("listMailboxes reads the store fast", { skip: !haveMail }, async (t) => {
+test("listMailboxes reads the store fast", { skip: mailSkip }, async (t) => {
   let boxes;
   try {
     const start = Date.now();
@@ -40,6 +47,7 @@ test("listMailboxes reads the store fast", { skip: !haveMail }, async (t) => {
     assert.ok(Array.isArray(boxes));
     assert.ok(ms < 8000, `listMailboxes took ${ms}ms`);
   } catch (e) {
+    if (!/authorization denied|operation not permitted|permission denied/i.test((e as Error).message)) throw e;
     t.skip(`mail store not readable: ${(e as Error).message}`);
     return;
   }
@@ -49,11 +57,12 @@ test("listMailboxes reads the store fast", { skip: !haveMail }, async (t) => {
   }
 });
 
-test("listMessages on INBOX is fast and well-shaped", { skip: !haveMail }, async (t) => {
+test("listMessages on INBOX is fast and well-shaped", { skip: mailSkip }, async (t) => {
   let boxes;
   try {
     boxes = await listMailboxes();
   } catch (e) {
+    if (!/authorization denied|operation not permitted|permission denied/i.test((e as Error).message)) throw e;
     t.skip(`mail store not readable: ${(e as Error).message}`);
     return;
   }
@@ -75,7 +84,7 @@ test("listMessages on INBOX is fast and well-shaped", { skip: !haveMail }, async
   }
 });
 
-test("searchMessages runs fast and returns an array", { skip: !haveMail }, async (t) => {
+test("searchMessages runs fast and returns an array", { skip: mailSkip }, async (t) => {
   try {
     const start = Date.now();
     const res = await searchMessages({ query: "the", limit: 5 });
@@ -84,6 +93,7 @@ test("searchMessages runs fast and returns an array", { skip: !haveMail }, async
     assert.ok(res.length <= 5);
     assert.ok(ms < 8000, `searchMessages took ${ms}ms`);
   } catch (e) {
+    if (!/authorization denied|operation not permitted|permission denied/i.test((e as Error).message)) throw e;
     t.skip(`mail store not readable: ${(e as Error).message}`);
   }
 });

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { OsaScriptError, runJxa, runOsascript } from "./osascript.js";
+import { MAX_SCRIPT_LENGTH } from "../constants.js";
 
 const macOnly = { skip: process.platform !== "darwin" };
 const payload = {
@@ -11,6 +12,22 @@ const payload = {
   note: "NOTE_CANARY_9812 '); throw new Error('executed'); // \\ end",
 };
 const canaries = ["BODY_CANARY_9812", "BCC_CANARY_9812", "NOTE_CANARY_9812"];
+
+test("oversized scripts reject before execution", async () => {
+  await assert.rejects(runOsascript(" ".repeat(MAX_SCRIPT_LENGTH + 1)), /Script too large/);
+});
+
+test("private pipe preserves falsy values and isolates concurrent calls", macOnly, async () => {
+  const inputs = [false, 0, "", null, ["日本語", 42], { text: "🌍".repeat(50_000) }];
+  const results = await Promise.all(inputs.map(args => runJxa({ script: "return INPUT;", args })));
+  assert.deepEqual(results, inputs);
+  assert.equal(await runJxa({ script: "return;" }), null);
+});
+
+test("raw scripts still support both languages without a payload", macOnly, async () => {
+  assert.equal((await runOsascript('"fixture"')).trim(), "fixture");
+  assert.equal((await runOsascript('return "fixture"', { language: "AppleScript" })).trim(), "fixture");
+});
 
 test("private payload round-trips as data and is absent from child argv and environment", macOnly, async () => {
   const result = await runJxa<{

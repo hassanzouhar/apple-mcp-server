@@ -82,11 +82,14 @@ export async function runOsascript(
       );
     }, timeoutMs);
 
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
+    // Decode across chunk boundaries so split UTF-8 characters stay intact.
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    proc.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
     });
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
+    proc.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
     });
     proc.on("error", (err) => {
       if (settled) return;
