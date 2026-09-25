@@ -4,14 +4,15 @@
  * We prefer JavaScript for Automation (JXA) over classic AppleScript because:
  *   - It supports JSON.stringify natively, so we can return structured data
  *     without inventing a serialization format.
- *   - It is far easier to interpolate user-supplied strings safely.
+ *   - It supports parsing user-supplied data separately from executable code.
  *
  * Scripts are passed via stdin (NOT via -e or argv) so we never have to worry
- * about shell quoting. User-supplied data is passed in via the `arguments`
- * array as a single JSON string, which the script then JSON.parses.
+ * about shell quoting. User-supplied JSON travels over a separate private pipe
+ * (file descriptor 3), never through process arguments or environment variables.
  */
 
 import { spawn } from "node:child_process";
+import type { Writable } from "node:stream";
 import {
   DEFAULT_OSASCRIPT_TIMEOUT_MS,
   MAX_SCRIPT_LENGTH,
@@ -35,12 +36,7 @@ export interface RunOsaOptions {
   language?: ScriptLanguage;
   /** Timeout in milliseconds. Default: DEFAULT_OSASCRIPT_TIMEOUT_MS. */
   timeoutMs?: number;
-  /**
-   * A plain JS value that will be JSON-stringified and passed to the script
-   * as a single argv string. The script can recover it with:
-   *   const args = JSON.parse($.NSProcessInfo.processInfo.arguments.js[4].js);
-   * or, more conveniently, use `runJxa({ script, args })` which wraps this.
-   */
+  /** JSON data sent over private file descriptor 3; use runJxa to parse it as INPUT. */
   argsJson?: string;
 }
 
@@ -62,18 +58,11 @@ export async function runOsascript(
   const language = options.language ?? "JavaScript";
   const timeoutMs = options.timeoutMs ?? DEFAULT_OSASCRIPT_TIMEOUT_MS;
 
-  const args: string[] = ["-l", language];
-  if (options.argsJson !== undefined) {
-    // We pass the JSON blob as a single argv. JXA can read it via
-    // ObjC.unwrap($.NSProcessInfo.processInfo.arguments.objectAtIndex(4)).
-    args.push("-", options.argsJson);
-  } else {
-    args.push("-");
-  }
+  const args = ["-l", language, "-"];
 
   return new Promise<string>((resolve, reject) => {
     const proc = spawn("/usr/bin/osascript", args, {
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe", "pipe"],
     });
 
     let stdout = "";
@@ -128,8 +117,20 @@ export async function runOsascript(
       resolve(stdout);
     });
 
-    proc.stdin.write(script);
-    proc.stdin.end();
+    const input = proc.stdio[3] as Writable;
+    // A child can exit before consuming either stream (syntax error or timeout).
+    // Handle pipe errors so they cannot become uncaught exceptions.
+    const onPipeError = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      proc.kill("SIGKILL");
+      reject(new OsaScriptError("Failed to write osascript input", stderr, null));
+    };
+    proc.stdin.on("error", onPipeError);
+    input.on("error", onPipeError);
+    proc.stdin.end(script);
+    input.end(options.argsJson ?? "null");
   });
 }
 
@@ -166,19 +167,19 @@ export async function runJxa<TResult = unknown, TArgs = unknown>(
   const argsJson = JSON.stringify(options.args ?? null);
 
   // Wrap the user's script body in a runner that:
-  //   1. Reads the JSON-encoded INPUT from argv[4] (osascript-style).
+  //   1. Reads the JSON-encoded INPUT from private file descriptor 3.
   //   2. Runs the body inside a try/catch and returns a tagged result.
   //
   // We MUST stringify the result ourselves before returning because JXA's
   // default coercion turns objects into "[object Object]".
   const wrapper = `
-    ObjC.import('stdlib');
-    function run(argv) {
+    ObjC.import('Foundation');
+    function run() {
       let INPUT = null;
       try {
-        if (argv && argv.length > 0) {
-          INPUT = JSON.parse(argv[0]);
-        }
+        const data = $.NSFileHandle.alloc.initWithFileDescriptor(3).readDataToEndOfFile;
+        const json = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+        INPUT = JSON.parse(ObjC.unwrap(json));
       } catch (e) {
         return JSON.stringify({ __ok: false, error: 'Failed to parse INPUT JSON: ' + (e && e.message ? e.message : String(e)) });
       }

@@ -130,7 +130,7 @@ If a tool returns `Error: macOS denied access. Grant the host app …`, that's a
 ## Design notes
 
 - **JXA, not classic AppleScript.** Every script is JavaScript — easier to interpolate user data safely and JSON-stringify return values.
-- **No shell quoting.** Scripts are passed to `osascript` over stdin. User input rides in a single argv slot as JSON; the wrapper inside `runJxa` parses it back into `INPUT`.
+- **No shell quoting.** Scripts are passed to `osascript` over stdin. User input travels as JSON over a separate private pipe (file descriptor 3), keeping it out of process arguments and environment variables; `runJxa` parses it back into `INPUT`.
 - **Each script is wrapped in a try/catch** that returns `{__ok, value | error}` so errors surface cleanly as MCP tool errors with actionable hints (we detect the macOS "not authorized" family of errors and translate them).
 - **One tool per app, dispatched on `action`.** Each app's tool re-validates its arguments against a precise per-action Zod schema inside the handler, so required fields and the `confirm: true` gate are still enforced even though the outer schema is permissive.
 - **Reads of Mail and iMessage go straight to SQLite.** Mail's Envelope Index and Messages' `chat.db` are read read-only (`immutable=1`, no lock) via `/usr/bin/sqlite3` — far faster than Apple Events. iMessage bodies that live in the binary `attributedBody` field are decoded heuristically; writes (Mail send/mark/delete, iMessage send) still go through JXA.

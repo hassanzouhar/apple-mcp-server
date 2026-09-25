@@ -78,7 +78,7 @@ per-action requirements).
 
 All tool handlers call `runJxa({ script, args, timeoutMs })`. Understanding its contract is essential:
 
-- **Never interpolate user data into the script string.** Pass it via `args` (any JSON-serializable value). `runJxa` JSON-stringifies it and hands it to the script as a single argv slot; the wrapper parses it back into a global **`INPUT`** variable available inside your script body. This is the safety boundary — it sidesteps both shell quoting *and* JXA string-injection.
+- **Never interpolate user data into the script string.** Pass it via `args` (any JSON-serializable value). `runJxa` JSON-stringifies it and sends it over a separate private pipe (file descriptor 3), never argv or environment; the wrapper parses it back into a global **`INPUT`** variable available inside your script body. This is the safety boundary — it sidesteps both shell quoting *and* JXA string-injection.
 - The script body is **a function body**, not a full program: it must `return` a JSON-serializable value. `runJxa` wraps it in an IIFE inside a try/catch that returns `{__ok, value|error}`, parses the result, and throws `OsaScriptError` on failure.
 - Scripts go to osascript over **stdin**, never via `-e`/argv.
 - `jxaDateLiteral()` exists for the rare case where a date must be inlined into the script text; the preferred path is passing ISO strings through `args` and doing `new Date(INPUT.iso)` in the body.
