@@ -53,6 +53,47 @@ interface RawContact {
   note: string | null;
 }
 
+/** JXA `serializePerson(p)`: builds a RawContact, tolerating unreadable fields. */
+const SERIALIZE_PERSON_JXA = `
+  function serializePerson(p) {
+    const field = (read) => { try { return read() || null; } catch (_) { return null; } };
+    const labelled = (read) => {
+      let items = [];
+      try { items = read(); } catch (_) {}
+      return items.map(e => {
+        try { return { label: e.label() || null, value: e.value() || "" }; }
+        catch (_) { return { label: null, value: "" }; }
+      });
+    };
+    let addresses = [];
+    try {
+      addresses = p.addresses().map(a => ({
+        label: field(() => a.label()),
+        street: field(() => a.street()),
+        city: field(() => a.city()),
+        state: field(() => a.state()),
+        zip: field(() => a.zip()),
+        country: field(() => a.country()),
+      }));
+    } catch (_) {}
+    let birthDate = null;
+    try { const b = p.birthDate(); birthDate = b ? b.toISOString() : null; } catch (_) {}
+    return {
+      id: p.id(),
+      name: p.name() || "",
+      firstName: p.firstName() || null,
+      lastName: p.lastName() || null,
+      organization: p.organization() || null,
+      jobTitle: p.jobTitle() || null,
+      emails: labelled(() => p.emails()),
+      phones: labelled(() => p.phones()),
+      addresses,
+      birthDate,
+      note: p.note() || null,
+    };
+  }
+`;
+
 /* ──────────────────────────────────────────────────────────────────────── */
 /* search_contacts                                                    */
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -76,6 +117,7 @@ async function searchContacts(params: z.infer<typeof SearchContactsInput>) {
     const contacts = await runJxa<RawContact[]>({
       args: { query: params.query.toLowerCase(), limit: params.limit },
       script: `
+        ${SERIALIZE_PERSON_JXA}
         const Contacts = Application('Contacts');
         // Bulk fetch: one Apple Event per field instead of several per contact.
         const q = INPUT.query;
@@ -95,46 +137,7 @@ async function searchContacts(params: z.infer<typeof SearchContactsInput>) {
         }
         const out = [];
         for (const i of hits) {
-          const p = Contacts.people[i];
-          let emailsRaw = [];
-          try { emailsRaw = p.emails(); } catch (_) {}
-          let phonesRaw = [];
-          try { phonesRaw = p.phones(); } catch (_) {}
-
-          const emails = emailsRaw.map(e => {
-            try { return { label: e.label() || null, value: e.value() || "" }; }
-            catch (_) { return { label: null, value: "" }; }
-          });
-          const phones = phonesRaw.map(e => {
-            try { return { label: e.label() || null, value: e.value() || "" }; }
-            catch (_) { return { label: null, value: "" }; }
-          });
-          let addrs = [];
-          try {
-            addrs = p.addresses().map(a => ({
-              label: (function(){ try { return a.label() || null; } catch (_) { return null; }})(),
-              street: (function(){ try { return a.street() || null; } catch (_) { return null; }})(),
-              city: (function(){ try { return a.city() || null; } catch (_) { return null; }})(),
-              state: (function(){ try { return a.state() || null; } catch (_) { return null; }})(),
-              zip: (function(){ try { return a.zip() || null; } catch (_) { return null; }})(),
-              country: (function(){ try { return a.country() || null; } catch (_) { return null; }})(),
-            }));
-          } catch (_) {}
-
-          let birth = null;
-          try { const b = p.birthDate(); birth = b ? b.toISOString() : null; } catch (_) {}
-
-          out.push({
-            id: p.id(),
-            name: p.name() || "",
-            firstName: p.firstName() || null,
-            lastName: p.lastName() || null,
-            organization: p.organization() || null,
-            jobTitle: p.jobTitle() || null,
-            emails, phones, addresses: addrs,
-            birthDate: birth,
-            note: p.note() || null,
-          });
+          out.push(serializePerson(Contacts.people[i]));
         }
         return out;
       `,
@@ -182,42 +185,11 @@ async function getContact(params: z.infer<typeof GetContactInput>) {
     const contact = await runJxa<RawContact | null>({
       args: { contactId: params.contact_id },
       script: `
+        ${SERIALIZE_PERSON_JXA}
         const Contacts = Application('Contacts');
         const matches = Contacts.people.whose({ id: INPUT.contactId })();
         if (matches.length === 0) return null;
-        const p = matches[0];
-        const emails = p.emails().map(e => {
-          try { return { label: e.label() || null, value: e.value() || "" }; }
-          catch (_) { return { label: null, value: "" }; }
-        });
-        const phones = p.phones().map(e => {
-          try { return { label: e.label() || null, value: e.value() || "" }; }
-          catch (_) { return { label: null, value: "" }; }
-        });
-        let addrs = [];
-        try {
-          addrs = p.addresses().map(a => ({
-            label: (function(){ try { return a.label() || null; } catch (_) { return null; }})(),
-            street: (function(){ try { return a.street() || null; } catch (_) { return null; }})(),
-            city: (function(){ try { return a.city() || null; } catch (_) { return null; }})(),
-            state: (function(){ try { return a.state() || null; } catch (_) { return null; }})(),
-            zip: (function(){ try { return a.zip() || null; } catch (_) { return null; }})(),
-            country: (function(){ try { return a.country() || null; } catch (_) { return null; }})(),
-          }));
-        } catch (_) {}
-        let birth = null;
-        try { const b = p.birthDate(); birth = b ? b.toISOString() : null; } catch (_) {}
-        return {
-          id: p.id(),
-          name: p.name() || "",
-          firstName: p.firstName() || null,
-          lastName: p.lastName() || null,
-          organization: p.organization() || null,
-          jobTitle: p.jobTitle() || null,
-          emails, phones, addresses: addrs,
-          birthDate: birth,
-          note: p.note() || null,
-        };
+        return serializePerson(matches[0]);
       `,
     });
 

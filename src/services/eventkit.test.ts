@@ -117,3 +117,31 @@ test(
     }
   },
 );
+
+// Regression: the tool schema accepts zone-less datetimes, missing seconds and
+// colon-less offsets; the helper used to reject all of them as "requires startIso".
+test("helper parses every date shape the tool schema accepts", async (t) => {
+  if (!helperOk || !calendarsAuthorized) {
+    t.skip("calendars not authorized");
+    return;
+  }
+  const shapes: Array<[string, string]> = [
+    ["2026-05-26", "2026-05-27"],
+    ["2026-05-26T11:00", "2026-05-26T13:00"],
+    ["2026-05-26T11:00:00", "2026-05-26T13:00:00"],
+    ["2026-05-26T11:00:00.250", "2026-05-26T13:00:00.250"],
+    ["2026-05-26T11:00:00Z", "2026-05-26T13:00:00Z"],
+    ["2026-05-26T11:00Z", "2026-05-26T13:00Z"],
+    ["2026-05-26T11:00:00+02:00", "2026-05-26T13:00:00+02:00"],
+    ["2026-05-26T11:00:00-0500", "2026-05-26T13:00:00-0500"],
+    ["2026-05-26T11:00:00.250+0200", "2026-05-26T13:00:00.250+0200"],
+  ];
+  for (const [startIso, endIso] of shapes) {
+    const events = await runHelper<unknown[]>("list-events", { startIso, endIso });
+    assert.ok(Array.isArray(events), `${startIso} → ${endIso}`);
+  }
+  await assert.rejects(
+    runHelper("list-events", { startIso: "tomorrow", endIso: "2026-05-27" }),
+    /requires startIso and endIso/,
+  );
+});

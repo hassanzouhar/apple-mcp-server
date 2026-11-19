@@ -92,8 +92,11 @@ export async function runHelper<T = unknown>(
       reject(new EventKitError(`eventkit-helper timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
-    proc.stdout.on("data", (c) => (stdout += c.toString("utf8")));
-    proc.stderr.on("data", (c) => (stderr += c.toString("utf8")));
+    // Decode across chunk boundaries so split UTF-8 characters stay intact.
+    proc.stdout.setEncoding("utf8");
+    proc.stderr.setEncoding("utf8");
+    proc.stdout.on("data", (c: string) => (stdout += c));
+    proc.stderr.on("data", (c: string) => (stderr += c));
     proc.on("error", (e) => {
       if (settled) return;
       settled = true;

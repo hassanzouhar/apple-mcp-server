@@ -68,6 +68,23 @@ interface RawMessage extends RawMessageSummary {
   content: string;
 }
 
+/** JXA helpers that build a RawMessageSummary from a Mail message. */
+const MESSAGE_FIELDS_JXA = `
+  function sentDate(m) { try { return m.dateSent(); } catch (_) { return null; } }
+  function isRead(m) { try { return !!m.readStatus(); } catch (_) { return true; } }
+  function messageSummary(m, box, account, ds, read) {
+    return {
+      id: m.id(),
+      subject: m.subject() || "",
+      sender: m.sender() || "",
+      dateSent: ds ? ds.toISOString() : null,
+      read,
+      mailbox: box.name(),
+      account: account.name(),
+    };
+  }
+`;
+
 /* ──────────────────────────────────────────────────────────────────────── */
 /* list_mail_accounts                                                 */
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -124,6 +141,25 @@ const ListMailboxesInput = z
   })
   .strict();
 
+function mailboxesResult(
+  params: z.infer<typeof ListMailboxesInput>,
+  boxes: RawMailbox[],
+) {
+  const md = [
+    `# Mailboxes (${boxes.length})`,
+    "",
+    ...boxes.map(
+      (b) =>
+        `- **${b.name}**${b.accountName ? ` _(${b.accountName})_` : ""}` +
+        (b.unreadCount > 0 ? ` — ${b.unreadCount} unread` : ""),
+    ),
+  ].join("\n");
+  return buildResult(params.response_format, md, {
+    count: boxes.length,
+    mailboxes: boxes,
+  });
+}
+
 async function listMailboxes(params: z.infer<typeof ListMailboxesInput>) {
   try {
     let boxes: RawMailbox[];
@@ -133,19 +169,7 @@ async function listMailboxes(params: z.infer<typeof ListMailboxesInput>) {
       if (e instanceof MailStoreUnavailable) return listMailboxesViaJxa(params);
       throw e;
     }
-    const md = [
-      `# Mailboxes (${boxes.length})`,
-      "",
-      ...boxes.map(
-        (b) =>
-          `- **${b.name}**${b.accountName ? ` _(${b.accountName})_` : ""}` +
-          (b.unreadCount > 0 ? ` — ${b.unreadCount} unread` : ""),
-      ),
-    ].join("\n");
-    return buildResult(params.response_format, md, {
-      count: boxes.length,
-      mailboxes: boxes,
-    });
+    return mailboxesResult(params, boxes);
   } catch (e) {
     return errorResult(e);
   }
@@ -178,19 +202,7 @@ async function listMailboxesViaJxa(params: z.infer<typeof ListMailboxesInput>) {
         return out;
       `,
     });
-    const md = [
-      `# Mailboxes (${boxes.length})`,
-      "",
-      ...boxes.map(
-        (b) =>
-          `- **${b.name}**${b.accountName ? ` _(${b.accountName})_` : ""}` +
-          (b.unreadCount > 0 ? ` — ${b.unreadCount} unread` : ""),
-      ),
-    ].join("\n");
-    return buildResult(params.response_format, md, {
-      count: boxes.length,
-      mailboxes: boxes,
-    });
+    return mailboxesResult(params, boxes);
   } catch (e) {
     return errorResult(e);
   }
@@ -227,12 +239,12 @@ const ListMessagesInput = z
   })
   .strict();
 
-function renderMessageList(
-  title: string,
+function messagesResult(
+  params: z.infer<typeof ListMessagesInput>,
   msgs: RawMessageSummary[],
-): string {
-  return [
-    title,
+) {
+  const md = [
+    `# Messages in \`${params.mailbox_name}\`${params.account_name ? ` _(${params.account_name})_` : ""} — ${msgs.length}`,
     "",
     ...msgs.map(
       (m) =>
@@ -240,6 +252,11 @@ function renderMessageList(
         `_from ${clip(m.sender, 40)}_ — ${humanDate(m.dateSent)} — id: \`${m.id}\``,
     ),
   ].join("\n");
+  return buildResult(params.response_format, md, {
+    count: msgs.length,
+    mailbox_name: params.mailbox_name,
+    messages: msgs,
+  });
 }
 
 async function listMessages(params: z.infer<typeof ListMessagesInput>) {
@@ -258,15 +275,7 @@ async function listMessages(params: z.infer<typeof ListMessagesInput>) {
       if (e instanceof MailStoreUnavailable) return listMessagesViaJxa(params);
       throw e;
     }
-    const md = renderMessageList(
-      `# Messages in \`${params.mailbox_name}\`${params.account_name ? ` _(${params.account_name})_` : ""} — ${msgs.length}`,
-      msgs,
-    );
-    return buildResult(params.response_format, md, {
-      count: msgs.length,
-      mailbox_name: params.mailbox_name,
-      messages: msgs,
-    });
+    return messagesResult(params, msgs);
   } catch (e) {
     return errorResult(e);
   }
@@ -285,6 +294,7 @@ async function listMessagesViaJxa(params: z.infer<typeof ListMessagesInput>) {
       },
       timeoutMs: MAIL_OSASCRIPT_TIMEOUT_MS,
       script: `
+        ${MESSAGE_FIELDS_JXA}
         const Mail = Application('Mail');
         const accounts = INPUT.accountName
           ? Mail.accounts.whose({ name: INPUT.accountName })()
@@ -308,22 +318,12 @@ async function listMessagesViaJxa(params: z.infer<typeof ListMessagesInput>) {
             const msgs = box.messages();
             for (let k = 0; k < msgs.length && out.length < INPUT.limit; k++) {
               const m = msgs[k];
-              let read = true;
-              try { read = !!m.readStatus(); } catch (_) {}
+              const read = isRead(m);
               if (INPUT.unreadOnly && read) continue;
-              let ds = null;
-              try { ds = m.dateSent(); } catch (_) {}
+              const ds = sentDate(m);
               if (since && (!ds || ds < since)) continue;
               if (until && (!ds || ds >= until)) continue;
-              out.push({
-                id: m.id(),
-                subject: m.subject() || "",
-                sender: m.sender() || "",
-                dateSent: ds ? ds.toISOString() : null,
-                read,
-                mailbox: box.name(),
-                account: a.name(),
-              });
+              out.push(messageSummary(m, box, a, ds, read));
               if (out.length >= INPUT.limit) break outer;
             }
           }
@@ -332,20 +332,7 @@ async function listMessagesViaJxa(params: z.infer<typeof ListMessagesInput>) {
       `,
     });
 
-    const md = [
-      `# Messages in \`${params.mailbox_name}\`${params.account_name ? ` _(${params.account_name})_` : ""} — ${msgs.length}`,
-      "",
-      ...msgs.map(
-        (m) =>
-          `- ${m.read ? "📭" : "📬"} **${clip(m.subject || "(no subject)", 70)}** ` +
-          `_from ${clip(m.sender, 40)}_ — ${humanDate(m.dateSent)} — id: \`${m.id}\``,
-      ),
-    ].join("\n");
-    return buildResult(params.response_format, md, {
-      count: msgs.length,
-      mailbox_name: params.mailbox_name,
-      messages: msgs,
-    });
+    return messagesResult(params, msgs);
   } catch (e) {
     return errorResult(e);
   }
@@ -386,6 +373,25 @@ const SearchMessagesInput = z
   })
   .strict();
 
+function searchResult(
+  params: z.infer<typeof SearchMessagesInput>,
+  msgs: RawMessageSummary[],
+) {
+  const md = [
+    `# Mail search: \`${params.query}\` (${msgs.length})`,
+    "",
+    ...msgs.map(
+      (m) =>
+        `- **${clip(m.subject || "(no subject)", 70)}** _from ${clip(m.sender, 40)}_ — ${humanDate(m.dateSent)} _(${m.mailbox})_ — id: \`${m.id}\``,
+    ),
+  ].join("\n");
+  return buildResult(params.response_format, md, {
+    query: params.query,
+    count: msgs.length,
+    messages: msgs,
+  });
+}
+
 async function searchMessages(params: z.infer<typeof SearchMessagesInput>) {
   try {
     let msgs: RawMessageSummary[];
@@ -400,19 +406,7 @@ async function searchMessages(params: z.infer<typeof SearchMessagesInput>) {
       if (e instanceof MailStoreUnavailable) return searchMessagesViaJxa(params);
       throw e;
     }
-    const md = [
-      `# Mail search: \`${params.query}\` (${msgs.length})`,
-      "",
-      ...msgs.map(
-        (m) =>
-          `- **${clip(m.subject || "(no subject)", 70)}** _from ${clip(m.sender, 40)}_ — ${humanDate(m.dateSent)} _(${m.mailbox})_ — id: \`${m.id}\``,
-      ),
-    ].join("\n");
-    return buildResult(params.response_format, md, {
-      query: params.query,
-      count: msgs.length,
-      messages: msgs,
-    });
+    return searchResult(params, msgs);
   } catch (e) {
     return errorResult(e);
   }
@@ -430,6 +424,7 @@ async function searchMessagesViaJxa(params: z.infer<typeof SearchMessagesInput>)
       },
       timeoutMs: MAIL_OSASCRIPT_TIMEOUT_MS,
       script: `
+        ${MESSAGE_FIELDS_JXA}
         const Mail = Application('Mail');
         const accounts = INPUT.accountName
           ? Mail.accounts.whose({ name: INPUT.accountName })()
@@ -450,19 +445,7 @@ async function searchMessagesViaJxa(params: z.infer<typeof SearchMessagesInput>)
               const subject = (m.subject() || "").toLowerCase();
               const sender = (m.sender() || "").toLowerCase();
               if (!subject.includes(INPUT.query) && !sender.includes(INPUT.query)) continue;
-              let ds = null;
-              try { ds = m.dateSent(); } catch (_) {}
-              let read = true;
-              try { read = !!m.readStatus(); } catch (_) {}
-              out.push({
-                id: m.id(),
-                subject: m.subject() || "",
-                sender: m.sender() || "",
-                dateSent: ds ? ds.toISOString() : null,
-                read,
-                mailbox: box.name(),
-                account: a.name(),
-              });
+              out.push(messageSummary(m, box, a, sentDate(m), isRead(m)));
               if (out.length >= INPUT.limit) break outer;
             }
           }
@@ -470,23 +453,68 @@ async function searchMessagesViaJxa(params: z.infer<typeof SearchMessagesInput>)
         return out;
       `,
     });
-    const md = [
-      `# Mail search: \`${params.query}\` (${msgs.length})`,
-      "",
-      ...msgs.map(
-        (m) =>
-          `- **${clip(m.subject || "(no subject)", 70)}** _from ${clip(m.sender, 40)}_ — ${humanDate(m.dateSent)} _(${m.mailbox})_ — id: \`${m.id}\``,
-      ),
-    ].join("\n");
-    return buildResult(params.response_format, md, {
-      query: params.query,
-      count: msgs.length,
-      messages: msgs,
-    });
+    return searchResult(params, msgs);
   } catch (e) {
     return errorResult(e);
   }
 }
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Single-message lookup (get / mark / delete)                              */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Use the Envelope Index (fast) to learn which account+mailbox holds a message,
+ * so JXA can go straight there.
+ */
+async function messageLookupArgs(messageId: string) {
+  let accountHint: string | null = null;
+  let mailboxLeafHint: string | null = null;
+  try {
+    const meta = await storeGetMessageMeta(messageId);
+    if (meta) {
+      accountHint = meta.account;
+      mailboxLeafHint = meta.mailbox.split("/").pop() ?? null;
+    }
+  } catch {
+    // Hints are optional: without index access, JXA scans every mailbox.
+  }
+  return { messageId, accountHint, mailboxLeafHint };
+}
+
+/**
+ * JXA `findMessage(Mail)`: tries the hinted mailbox, then scans every mailbox.
+ * Mail's ids are integers, so the id is coerced before the whose() comparison.
+ */
+const FIND_MESSAGE_JXA = `
+  function findMessage(Mail) {
+    const idNum = Number(INPUT.messageId);
+    const id = Number.isInteger(idNum) ? idNum : INPUT.messageId;
+    const scan = (accounts, boxesOf) => {
+      for (let i = 0; i < accounts.length; i++) {
+        const boxes = boxesOf(accounts[i]);
+        for (let j = 0; j < boxes.length; j++) {
+          let matches = [];
+          try { matches = boxes[j].messages.whose({ id: id })(); } catch (_) {}
+          if (matches.length > 0) {
+            return { message: matches[0], box: boxes[j], account: accounts[i] };
+          }
+        }
+      }
+      return null;
+    };
+    if (INPUT.accountHint && INPUT.mailboxLeafHint) {
+      let hinted = [];
+      try { hinted = Mail.accounts.whose({ name: INPUT.accountHint })(); } catch (_) {}
+      const hit = scan(hinted, (a) => {
+        try { return a.mailboxes.whose({ name: INPUT.mailboxLeafHint })(); }
+        catch (_) { return []; }
+      });
+      if (hit) return hit;
+    }
+    return scan(Mail.accounts(), (a) => a.mailboxes());
+  }
+`;
 
 /* ──────────────────────────────────────────────────────────────────────── */
 /* get_message                                                        */
@@ -506,79 +534,25 @@ const GetMessageInput = z
 
 async function getMessage(params: z.infer<typeof GetMessageInput>) {
   try {
-    // Use the Envelope Index (fast) to learn which account+mailbox holds this
-    // message, then point JXA straight at it. The full RFC822 body and the
-    // recipient lists only come from Mail.app, but a *targeted* fetch is cheap.
-    // Falls back to a full scan if the index is unavailable or the hint misses.
-    let accountHint: string | null = null;
-    let mailboxLeafHint: string | null = null;
-    try {
-      const meta = await storeGetMessageMeta(params.message_id);
-      if (meta) {
-        accountHint = meta.account;
-        mailboxLeafHint = meta.mailbox.split("/").pop() ?? null;
-      }
-    } catch (e) {
-      if (!(e instanceof MailStoreUnavailable)) throw e;
-      // index unavailable → proceed hint-less (full scan)
-    }
-
     const msg = await runJxa<RawMessage | null>({
-      args: {
-        messageId: params.message_id,
-        accountHint,
-        mailboxLeafHint,
-      },
+      args: await messageLookupArgs(params.message_id),
       timeoutMs: MAIL_OSASCRIPT_TIMEOUT_MS,
       script: `
+        ${MESSAGE_FIELDS_JXA}
+        ${FIND_MESSAGE_JXA}
         const Mail = Application('Mail');
-        const idNum = Number(INPUT.messageId);
-        const id = Number.isInteger(idNum) ? idNum : INPUT.messageId;
-
-        let accounts = [];
-        if (INPUT.accountHint) {
-          try { accounts = Mail.accounts.whose({ name: INPUT.accountHint })(); } catch (_) {}
-        }
-        if (!accounts || accounts.length === 0) accounts = Mail.accounts();
-
-        for (let i = 0; i < accounts.length; i++) {
-          const a = accounts[i];
-          let boxes = [];
-          if (INPUT.mailboxLeafHint) {
-            try { boxes = a.mailboxes.whose({ name: INPUT.mailboxLeafHint })(); } catch (_) {}
-          }
-          if (!boxes || boxes.length === 0) boxes = a.mailboxes();
-          for (let j = 0; j < boxes.length; j++) {
-            const box = boxes[j];
-            let matches;
-            try { matches = box.messages.whose({ id: id })(); }
-            catch (_) { matches = []; }
-            if (matches.length > 0) {
-              const m = matches[0];
-              let ds = null;
-              try { ds = m.dateSent(); } catch (_) {}
-              let read = true;
-              try { read = !!m.readStatus(); } catch (_) {}
-              let recipients = [];
-              try { recipients = m.toRecipients().map(r => r.address ? r.address() : ""); } catch (_) {}
-              let ccs = [];
-              try { ccs = m.ccRecipients().map(r => r.address ? r.address() : ""); } catch (_) {}
-              return {
-                id: m.id(),
-                subject: m.subject() || "",
-                sender: m.sender() || "",
-                dateSent: ds ? ds.toISOString() : null,
-                read,
-                mailbox: box.name(),
-                account: a.name(),
-                recipients,
-                ccRecipients: ccs,
-                content: m.content() || "",
-              };
-            }
-          }
-        }
-        return null;
+        const hit = findMessage(Mail);
+        if (!hit) return null;
+        const m = hit.message;
+        let recipients = [];
+        try { recipients = m.toRecipients().map(r => r.address ? r.address() : ""); } catch (_) {}
+        let ccs = [];
+        try { ccs = m.ccRecipients().map(r => r.address ? r.address() : ""); } catch (_) {}
+        return Object.assign(messageSummary(m, hit.box, hit.account, sentDate(m), isRead(m)), {
+          recipients,
+          ccRecipients: ccs,
+          content: m.content() || "",
+        });
       `,
     });
     if (!msg) {
@@ -767,24 +741,15 @@ const MarkMessageInput = z
 async function markMessage(params: z.infer<typeof MarkMessageInput>) {
   try {
     const ok = await runJxa<{ updated: boolean }>({
-      args: { messageId: params.message_id, read: params.read },
+      args: { ...(await messageLookupArgs(params.message_id)), read: params.read },
       timeoutMs: MAIL_OSASCRIPT_TIMEOUT_MS,
       script: `
+        ${FIND_MESSAGE_JXA}
         const Mail = Application('Mail');
-        const accounts = Mail.accounts();
-        for (let i = 0; i < accounts.length; i++) {
-          const boxes = accounts[i].mailboxes();
-          for (let j = 0; j < boxes.length; j++) {
-            let matches;
-            try { matches = boxes[j].messages.whose({ id: INPUT.messageId })(); }
-            catch (_) { matches = []; }
-            if (matches.length > 0) {
-              matches[0].readStatus = INPUT.read;
-              return { updated: true };
-            }
-          }
-        }
-        throw new Error("Message not found: " + INPUT.messageId);
+        const hit = findMessage(Mail);
+        if (!hit) throw new Error("Message not found: " + INPUT.messageId);
+        hit.message.readStatus = INPUT.read;
+        return { updated: true };
       `,
     });
     return buildResult(
@@ -816,24 +781,15 @@ const DeleteMessageInput = z
 async function deleteMessage(params: z.infer<typeof DeleteMessageInput>) {
   try {
     const ok = await runJxa<{ deleted: boolean }>({
-      args: { messageId: params.message_id },
+      args: await messageLookupArgs(params.message_id),
       timeoutMs: MAIL_OSASCRIPT_TIMEOUT_MS,
       script: `
+        ${FIND_MESSAGE_JXA}
         const Mail = Application('Mail');
-        const accounts = Mail.accounts();
-        for (let i = 0; i < accounts.length; i++) {
-          const boxes = accounts[i].mailboxes();
-          for (let j = 0; j < boxes.length; j++) {
-            let matches;
-            try { matches = boxes[j].messages.whose({ id: INPUT.messageId })(); }
-            catch (_) { matches = []; }
-            if (matches.length > 0) {
-              Mail.delete(matches[0]);
-              return { deleted: true };
-            }
-          }
-        }
-        throw new Error("Message not found: " + INPUT.messageId);
+        const hit = findMessage(Mail);
+        if (!hit) throw new Error("Message not found: " + INPUT.messageId);
+        Mail.delete(hit.message);
+        return { deleted: true };
       `,
     });
     return buildResult(

@@ -21,7 +21,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { querySqlite, sqlLiteral } from "./sqlite.js";
+import { containsGlob, querySqlite, sqlLiteral } from "./sqlite.js";
 
 /** Thrown when the on-disk store is missing or its schema is unrecognized. */
 export class MailStoreUnavailable extends Error {
@@ -307,8 +307,7 @@ export async function searchMessages(
     boxById = new Map(boxes.map((b) => [b.rowid, b]));
   }
 
-  const pattern = "%" + opts.query.toLowerCase().replace(/[%_\\]/g, "\\$&") + "%";
-  const lit = sqlLiteral(pattern);
+  const lit = sqlLiteral(containsGlob(opts.query));
   const rows = await querySqlite<RawRow>(
     db,
     `SELECT m.ROWID AS id,
@@ -320,9 +319,9 @@ export async function searchMessages(
      JOIN subjects s ON s.ROWID = m.subject
      LEFT JOIN addresses a ON a.ROWID = m.sender
      WHERE m.deleted = 0 ${boxFilter}
-       AND ( lower(s.subject) LIKE ${lit} ESCAPE '\\'
-          OR lower(COALESCE(a.address,'')) LIKE ${lit} ESCAPE '\\'
-          OR lower(COALESCE(a.comment,'')) LIKE ${lit} ESCAPE '\\' )
+       AND ( s.subject GLOB ${lit}
+          OR a.address GLOB ${lit}
+          OR a.comment GLOB ${lit} )
      ORDER BY m.date_received DESC
      LIMIT ${Math.max(1, Math.floor(opts.limit))};`,
   );

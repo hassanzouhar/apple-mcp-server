@@ -39,29 +39,65 @@ function toStructured(value: unknown): Record<string, unknown> {
 }
 
 /**
+ * Shrink a payload until its JSON fits CHARACTER_LIMIT, staying valid JSON:
+ * clip oversized strings (a mail body), then drop trailing items of the longest
+ * array. Marks the result `truncated` so the agent knows to narrow the request.
+ */
+function fitToLimit(payload: Record<string, unknown>): Record<string, unknown> {
+  if (JSON.stringify(payload).length <= CHARACTER_LIMIT) return payload;
+
+  const out: Record<string, unknown> = { ...payload, truncated: true };
+  const maxString = Math.floor(CHARACTER_LIMIT / 4); // room for JSON escaping
+  for (const [key, value] of Object.entries(out)) {
+    if (typeof value === "string" && value.length > maxString) {
+      out[key] = clip(value, maxString);
+    }
+  }
+
+  const arrays = Object.entries(out).filter(
+    (entry): entry is [string, unknown[]] => Array.isArray(entry[1]),
+  );
+  arrays.sort((a, b) => b[1].length - a[1].length);
+  const longest = arrays[0];
+  if (longest) {
+    const [key, items] = longest;
+    let kept = items.length;
+    while (kept > 0 && JSON.stringify(out).length > CHARACTER_LIMIT) {
+      kept = Math.floor(kept * 0.8);
+      out[key] = items.slice(0, kept);
+    }
+    out.omitted_items = items.length - kept;
+  }
+  return out;
+}
+
+/**
  * Build a successful ToolResult, automatically choosing the text content
- * representation based on the requested response format.
+ * representation based on the requested response format. Markdown responses
+ * carry no structuredContent: it would send the same data twice and bypass
+ * CHARACTER_LIMIT.
  */
 export function buildResult(
   format: ResponseFormat,
   markdown: string,
   structured: unknown,
 ): ToolResult {
-  let text = format === ResponseFormat.MARKDOWN
-    ? markdown
-    : JSON.stringify(structured, null, 2);
+  if (format === ResponseFormat.JSON) {
+    const fitted = fitToLimit(toStructured(structured));
+    return {
+      content: [{ type: "text", text: JSON.stringify(fitted) }],
+      structuredContent: fitted,
+    };
+  }
 
+  let text = markdown;
   if (text.length > CHARACTER_LIMIT) {
     const truncMsg =
       `\n\n[Response truncated: ${text.length} > ${CHARACTER_LIMIT} chars. ` +
       `Pass a smaller \`limit\`, narrower date range, or more specific filters.]`;
     text = text.slice(0, CHARACTER_LIMIT - truncMsg.length) + truncMsg;
   }
-
-  return {
-    content: [{ type: "text", text }],
-    structuredContent: toStructured(structured),
-  };
+  return { content: [{ type: "text", text }] };
 }
 
 /**

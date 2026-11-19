@@ -70,11 +70,37 @@ let isoOut: ISO8601DateFormatter = {
     return f
 }()
 
+/// Fallback formats for everything the tool schema accepts but ISO8601DateFormatter
+/// rejects: zone-less datetimes (interpreted in the user's local timezone), a
+/// missing seconds component, and offsets without a colon (e.g. -0500).
+let fallbackFormatters: [DateFormatter] = [
+    "yyyy-MM-dd'T'HH:mm:ss.SSS",
+    "yyyy-MM-dd'T'HH:mm:ss",
+    "yyyy-MM-dd'T'HH:mm",
+    "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+    "yyyy-MM-dd'T'HH:mm:ssXXX",
+    "yyyy-MM-dd'T'HH:mmXXX",
+    "yyyy-MM-dd'T'HH:mm:ss.SSSXX",
+    "yyyy-MM-dd'T'HH:mm:ssXX",
+    "yyyy-MM-dd'T'HH:mmXX",
+].map { fmt in
+    let f = DateFormatter()
+    f.calendar = Calendar(identifier: .gregorian)
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.timeZone = TimeZone.current
+    f.isLenient = false
+    f.dateFormat = fmt
+    return f
+}
+
 func parseDate(_ s: Any?) -> Date? {
     guard let str = s as? String, !str.isEmpty else { return nil }
     if let d = isoFull.date(from: str) { return d }
     if let d = isoPlain.date(from: str) { return d }
     if let d = dateOnly.date(from: str) { return d }
+    for f in fallbackFormatters {
+        if let d = f.date(from: str) { return d }
+    }
     return nil
 }
 
@@ -135,6 +161,7 @@ func eventDict(_ e: EKEvent) -> [String: Any] {
         "description": e.notes ?? NSNull(),
         "calendarName": e.calendar?.title ?? "",
         "url": e.url?.absoluteString ?? NSNull(),
+        "recurring": e.hasRecurrenceRules,
     ]
 }
 
@@ -189,6 +216,33 @@ func intArg(_ key: String, _ fallback: Int) -> Int {
 }
 func strArg(_ key: String) -> String? { return args[key] as? String }
 func boolArg(_ key: String, _ fallback: Bool) -> Bool { return args[key] as? Bool ?? fallback }
+
+/// Every occurrence of a recurring event shares one identifier and
+/// `event(withIdentifier:)` returns the first, so a write must name its occurrence.
+func eventForWrite() -> EKEvent {
+    guard let id = strArg("id"), let first = store.event(withIdentifier: id) else { fail("Event not found") }
+    guard first.hasRecurrenceRules else { return first }
+    guard let when = parseDate(args["occurrenceIso"]) else {
+        fail("This event repeats. Pass occurrence_date with the startDate of the occurrence to change.")
+    }
+    let window = store.predicateForEvents(
+        withStart: when.addingTimeInterval(-1), end: when.addingTimeInterval(86_400), calendars: nil)
+    let match = store.events(matching: window).first {
+        $0.eventIdentifier == id && abs($0.startDate.timeIntervalSince(when)) < 1
+    }
+    guard let occurrence = match else { fail("No occurrence of this event starts at the given occurrence_date") }
+    return occurrence
+}
+
+/// A date-only value stays date-only instead of becoming a reminder due at midnight.
+func dueComponents(_ raw: Any?) -> DateComponents? {
+    guard let due = parseDate(raw) else { return nil }
+    let dateOnlyValue = (raw as? String)?.count == 10
+    let units: Set<Calendar.Component> = dateOnlyValue
+        ? [.year, .month, .day]
+        : [.year, .month, .day, .hour, .minute, .second]
+    return Calendar.current.dateComponents(units, from: due)
+}
 
 switch command {
 
@@ -260,7 +314,7 @@ case "create-event":
 
 case "update-event":
     requestAccess(.event)
-    guard let id = strArg("id"), let e = store.event(withIdentifier: id) else { fail("Event not found") }
+    let e = eventForWrite()
     if let v = strArg("summary") { e.title = v }
     if let d = parseDate(args["startIso"]) { e.startDate = d }
     if let d = parseDate(args["endIso"]) { e.endDate = d }
@@ -273,7 +327,7 @@ case "update-event":
 
 case "delete-event":
     requestAccess(.event)
-    guard let id = strArg("id"), let e = store.event(withIdentifier: id) else { fail("Event not found") }
+    let e = eventForWrite()
     do { try store.remove(e, span: .thisEvent, commit: true) } catch { fail("Delete failed: \(error.localizedDescription)") }
     succeed(["deleted": true])
 
@@ -321,10 +375,7 @@ case "create-reminder":
     r.calendar = cal
     r.title = strArg("name") ?? ""
     if let notes = strArg("body") { r.notes = notes }
-    if let due = parseDate(args["dueIso"]) {
-        r.dueDateComponents = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second], from: due)
-    }
+    if let due = dueComponents(args["dueIso"]) { r.dueDateComponents = due }
     if let remind = parseDate(args["remindIso"]) { r.addAlarm(EKAlarm(absoluteDate: remind)) }
     if let p = args["priority"] as? Int { r.priority = p }
     do { try store.save(r, commit: true) } catch { fail("Save failed: \(error.localizedDescription)") }
@@ -336,11 +387,8 @@ case "update-reminder":
           let r = store.calendarItem(withIdentifier: id) as? EKReminder else { fail("Reminder not found") }
     if let v = strArg("name") { r.title = v }
     if let v = strArg("body") { r.notes = v }
-    if let due = parseDate(args["dueIso"]) {
-        r.dueDateComponents = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second], from: due)
-    }
-    if let remind = parseDate(args["remindIso"]) { r.addAlarm(EKAlarm(absoluteDate: remind)) }
+    if let due = dueComponents(args["dueIso"]) { r.dueDateComponents = due }
+    if let remind = parseDate(args["remindIso"]) { r.alarms = [EKAlarm(absoluteDate: remind)] }
     if let p = args["priority"] as? Int { r.priority = p }
     do { try store.save(r, commit: true) } catch { fail("Save failed: \(error.localizedDescription)") }
     succeed(["updated": true])

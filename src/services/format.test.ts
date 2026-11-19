@@ -10,6 +10,7 @@ import {
   humanDate,
 } from "./format.js";
 import { OsaScriptError } from "./osascript.js";
+import { CHARACTER_LIMIT } from "../constants.js";
 
 test("clip truncates with ellipsis and passes short strings through", () => {
   assert.equal(clip("hello", 80), "hello");
@@ -28,15 +29,30 @@ test("humanDate renders ISO and degrades gracefully", () => {
 test("buildResult returns markdown or JSON per format", () => {
   const md = buildResult(ResponseFormat.MARKDOWN, "# Title", { a: 1 });
   assert.equal(md.content[0].text, "# Title");
-  assert.deepEqual(md.structuredContent, { a: 1 });
+  assert.equal(md.structuredContent, undefined, "markdown must not send the data twice");
 
   const json = buildResult(ResponseFormat.JSON, "# Title", { a: 1 });
-  assert.equal(json.content[0].text, JSON.stringify({ a: 1 }, null, 2));
+  assert.equal(json.content[0].text, JSON.stringify({ a: 1 }));
+  assert.deepEqual(json.structuredContent, { a: 1 });
 });
 
 test("buildResult wraps non-object structured payloads", () => {
-  const r = buildResult(ResponseFormat.MARKDOWN, "x", [1, 2, 3]);
+  const r = buildResult(ResponseFormat.JSON, "x", [1, 2, 3]);
   assert.deepEqual(r.structuredContent, { value: [1, 2, 3] });
+});
+
+test("oversized JSON stays parseable and within the limit", () => {
+  const events = Array.from({ length: 2000 }, (_, i) => ({ id: i, summary: "x".repeat(50) }));
+  const list = buildResult(ResponseFormat.JSON, "", { count: 2000, events });
+  const parsed = JSON.parse(list.content[0].text);
+  assert.ok(list.content[0].text.length <= CHARACTER_LIMIT);
+  assert.equal(parsed.truncated, true);
+  assert.equal(parsed.omitted_items, 2000 - parsed.events.length);
+  assert.deepEqual(list.structuredContent, parsed);
+
+  const mail = buildResult(ResponseFormat.JSON, "", { id: "1", content: "æ\n".repeat(40_000) });
+  assert.ok(mail.content[0].text.length <= CHARACTER_LIMIT);
+  assert.equal(JSON.parse(mail.content[0].text).truncated, true);
 });
 
 test("buildResult truncates oversized text with a hint", () => {

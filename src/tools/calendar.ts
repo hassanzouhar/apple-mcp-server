@@ -41,6 +41,12 @@ interface RawEvent {
   description: string | null;
   calendarName: string;
   url: string | null;
+  recurring: boolean;
+}
+
+/** Recurring occurrences share an id, so writes need this value to target one. */
+function occurrenceNote(e: RawEvent): string {
+  return e.recurring ? ` — occurrence_date: \`${e.startDate}\`` : "";
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */
@@ -122,7 +128,8 @@ async function listEvents(params: z.infer<typeof ListEventsInput>) {
               (e) =>
                 `- **${humanDate(e.startDate)}** — ${e.summary}` +
                 (e.location ? ` _@${clip(e.location, 40)}_` : "") +
-                ` _(${e.calendarName})_ — id: \`${e.id}\``,
+                ` _(${e.calendarName})_ — id: \`${e.id}\`` +
+                occurrenceNote(e),
             )
             .join("\n"),
     ].join("\n");
@@ -184,7 +191,8 @@ async function searchEvents(params: z.infer<typeof SearchEventsInput>) {
       "",
       ...events.map(
         (e) =>
-          `- **${humanDate(e.startDate)}** — ${e.summary} _(${e.calendarName})_ — id: \`${e.id}\``,
+          `- **${humanDate(e.startDate)}** — ${e.summary} _(${e.calendarName})_ — id: \`${e.id}\`` +
+          occurrenceNote(e),
       ),
     ].join("\n");
     return buildResult(params.response_format, md, structured);
@@ -295,6 +303,9 @@ async function createEvent(params: z.infer<typeof CreateEventInput>) {
 const UpdateEventInput = z
   .object({
     event_id: z.string().min(1).describe("The event identifier to update."),
+    occurrence_date: optionalIsoDateField.describe(
+      "Required for a recurring event: the startDate of the occurrence to change.",
+    ),
     summary: z.string().min(1).max(500).optional(),
     start_date: optionalIsoDateField,
     end_date: optionalIsoDateField,
@@ -325,6 +336,7 @@ async function updateEvent(params: z.infer<typeof UpdateEventInput>) {
   try {
     const ok = await runHelper<{ updated: boolean }>("update-event", {
       id: params.event_id,
+      occurrenceIso: params.occurrence_date ?? null,
       summary: params.summary ?? null,
       startIso: params.start_date ?? null,
       endIso: params.end_date ?? null,
@@ -350,6 +362,9 @@ async function updateEvent(params: z.infer<typeof UpdateEventInput>) {
 const DeleteEventInput = z
   .object({
     event_id: z.string().min(1),
+    occurrence_date: optionalIsoDateField.describe(
+      "Required for a recurring event: the startDate of the occurrence to change.",
+    ),
     confirm: z
       .literal(true)
       .describe(
@@ -363,6 +378,7 @@ async function deleteEvent(params: z.infer<typeof DeleteEventInput>) {
   try {
     const ok = await runHelper<{ deleted: boolean }>("delete-event", {
       id: params.event_id,
+      occurrenceIso: params.occurrence_date ?? null,
     });
     return buildResult(
       params.response_format,
@@ -396,8 +412,8 @@ const calendarAction = z
       "• search_events — query; optional start_date, end_date, calendar_name, limit",
       "• get_event — event_id",
       "• create_event — calendar_name, summary, start_date, end_date; optional all_day, location, description, url",
-      "• update_event — event_id + at least one of summary/start_date/end_date/all_day/location/description/url",
-      "• delete_event — event_id, confirm=true",
+      "• update_event — event_id + at least one of summary/start_date/end_date/all_day/location/description/url; occurrence_date required for recurring events",
+      "• delete_event — event_id, confirm=true; occurrence_date required for recurring events",
     ].join("\n"),
   );
 

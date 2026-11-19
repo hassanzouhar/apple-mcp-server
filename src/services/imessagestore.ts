@@ -25,7 +25,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { querySqlite, sqlLiteral } from "./sqlite.js";
+import { containsGlob, querySqlite, sqlLiteral } from "./sqlite.js";
 
 /** Thrown when chat.db is missing or its schema is unrecognized. */
 export class ImessageStoreUnavailable extends Error {
@@ -183,9 +183,16 @@ export async function listChats(opts: ListChatsOpts): Promise<ChatSummary[]> {
   const db = requireDb();
   await assertSchema(db);
 
-  // Pull a generous slab of the most-recently-active chats; we filter/slice in
-  // JS so a `query` can match display name, identifier, OR a participant handle.
-  const slab = Math.max(opts.limit * (opts.query ? 8 : 1), opts.limit);
+  // Filter in SQL so a `query` reaches every chat, not just the most recent ones.
+  let queryFilter = "";
+  if (opts.query) {
+    const lit = sqlLiteral(containsGlob(opts.query));
+    queryFilter = `WHERE c.display_name GLOB ${lit}
+        OR c.chat_identifier GLOB ${lit}
+        OR EXISTS (SELECT 1 FROM chat_handle_join chj
+                   JOIN handle h ON h.ROWID = chj.handle_id
+                   WHERE chj.chat_id = c.ROWID AND h.id GLOB ${lit})`;
+  }
   const chats = await querySqlite<ChatRow>(
     db,
     `SELECT c.ROWID AS id, c.guid AS guid, c.chat_identifier AS identifier,
@@ -194,9 +201,10 @@ export async function listChats(opts: ListChatsOpts): Promise<ChatSummary[]> {
      FROM chat c
      JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
      JOIN message m ON m.ROWID = cmj.message_id
+     ${queryFilter}
      GROUP BY c.ROWID
      ORDER BY last_date DESC
-     LIMIT ${Math.max(1, Math.floor(slab))};`,
+     LIMIT ${Math.max(1, Math.floor(opts.limit))};`,
   );
   if (chats.length === 0) return [];
 
@@ -204,7 +212,7 @@ export async function listChats(opts: ListChatsOpts): Promise<ChatSummary[]> {
   const participants = await participantsByChat(db, ids);
   const lasts = await lastMessageByChat(db, ids);
 
-  let out: ChatSummary[] = chats.map((c) => {
+  return chats.map((c) => {
     const last = lasts.get(c.id);
     return {
       id: String(c.id),
@@ -221,17 +229,6 @@ export async function listChats(opts: ListChatsOpts): Promise<ChatSummary[]> {
       lastFromMe: last ? !!last.from_me : false,
     };
   });
-
-  if (opts.query) {
-    const q = opts.query.toLowerCase();
-    out = out.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.identifier.toLowerCase().includes(q) ||
-        c.participants.some((p) => p.toLowerCase().includes(q)),
-    );
-  }
-  return out.slice(0, opts.limit);
 }
 
 export interface ListImessagesOpts {
