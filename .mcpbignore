@@ -19,3 +19,4 @@ CLAUDE.md
 **/.DS_Store
 .mcpbignore
 *.mcpb
+.issue-drafts/
