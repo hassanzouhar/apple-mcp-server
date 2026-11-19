@@ -77,23 +77,29 @@ async function searchContacts(params: z.infer<typeof SearchContactsInput>) {
       args: { query: params.query.toLowerCase(), limit: params.limit },
       script: `
         const Contacts = Application('Contacts');
-        const people = Contacts.people();
-        const out = [];
+        // Bulk fetch: one Apple Event per field instead of several per contact.
         const q = INPUT.query;
-        for (let i = 0; i < people.length && out.length < INPUT.limit; i++) {
-          const p = people[i];
-          const name = (p.name() || "").toLowerCase();
-          const org  = (p.organization() || "").toLowerCase();
+        const lc = (v) => (v === null || v === undefined) ? "" : String(v).toLowerCase();
+        const names = Contacts.people.name();
+        let orgs = [];
+        try { orgs = Contacts.people.organization(); } catch (_) {}
+        let allEmails = [];
+        try { allEmails = Contacts.people.emails.value(); } catch (_) {}
+        let allPhones = [];
+        try { allPhones = Contacts.people.phones.value(); } catch (_) {}
+        const hits = [];
+        for (let i = 0; i < names.length && hits.length < INPUT.limit; i++) {
+          if (lc(names[i]).includes(q) || lc(orgs[i]).includes(q)
+            || (allEmails[i] || []).some(v => lc(v).includes(q))
+            || (allPhones[i] || []).some(v => lc(v).includes(q))) hits.push(i);
+        }
+        const out = [];
+        for (const i of hits) {
+          const p = Contacts.people[i];
           let emailsRaw = [];
           try { emailsRaw = p.emails(); } catch (_) {}
           let phonesRaw = [];
           try { phonesRaw = p.phones(); } catch (_) {}
-          const emailVals = emailsRaw.map(e => { try { return (e.value() || "").toLowerCase(); } catch (_) { return ""; } });
-          const phoneVals = phonesRaw.map(e => { try { return (e.value() || "").toLowerCase(); } catch (_) { return ""; } });
-          const hit = name.includes(q) || org.includes(q)
-            || emailVals.some(v => v.includes(q))
-            || phoneVals.some(v => v.includes(q));
-          if (!hit) continue;
 
           const emails = emailsRaw.map(e => {
             try { return { label: e.label() || null, value: e.value() || "" }; }
